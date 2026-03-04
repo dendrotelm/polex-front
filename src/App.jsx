@@ -1,6 +1,26 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { io } from "socket.io-client"; // NOWE: Import obsługi WebSocketów
+import { io } from "socket.io-client";
+
+// ─── TARCZA OCHRONNA (ERROR BOUNDARY) ───────────────────────────────────
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ color: '#ff4444', background: '#0a0a0a', padding: '30px', fontFamily: 'monospace', height: '100vh', overflow: 'auto' }}>
+          <h2>🚨 KRYTYCZNY BŁĄD GRY 🚨</h2>
+          <pre style={{ background: '#111', padding: '15px', borderLeft: '4px solid #ff4444', whiteSpace: 'pre-wrap', fontSize: '14px' }}>
+            {this.state.error && this.state.error.toString()}
+            <br /><br />{this.state.error && this.state.error.stack}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // ─── KONFIGURACJA ANOMALII (ŁĄCZNIE 26) ──────────────────────────────────
 const ANOMALIES = [
@@ -447,10 +467,10 @@ function buildEndingScene() {
 }
 
 // ─── MAIN COMPONENT ────────────────────────────────────────────────────────────
-export default function PrlExit8() {
+function PrlExit8Game() {
   const mountRef = useRef(null);
   const R = useRef({});
-  const socketRef = useRef(null); // Ref dla socketów
+  const socketRef = useRef(null); 
   
   const S = useRef({
     phase:"menu", 
@@ -464,7 +484,7 @@ export default function PrlExit8() {
     flashlightOn: false, lastHitTime: 0, lastTvHit: 0,
     helpTimer: null,
     baseSetup: { bikeSide: 1, strollerSide: 1, messSide: 1, paintingSide: 1 },
-    mpStep: 0, mpData: null // Dane i licznik schodów dla multiplayera
+    mpStep: 0, mpData: null 
   });
   
   const stepCount = useRef(0);
@@ -475,19 +495,29 @@ export default function PrlExit8() {
     phase:"menu", exitCount:0, streak:0, sanity: 100,
     message:"", hint:false, hintText: "", steps:0, anomaly:null, hasAnomaly:false,
     rzepaHint:false, catPrompt:"", catMessage:"", tvPrompt: false,
-    showHelp: false, oppExitCount: 0, oppMessage: "",
+    showHelp: false, oppMessage: "",
     familiada: { active: false, qId: 0, step: 'none', points: 0, ansText: "" }
+  });
+
+  // Stan dla trybu Multiplayer
+  const [mpState, setMpState] = useState({
+    playerName: "Gracz" + Math.floor(Math.random() * 1000),
+    roomCodeInput: "",
+    currentRoom: null, 
+    error: "",
+    opponentsProgress: {}
   });
   
   const [opts, setOpts] = useState({ 
     vhs: true, muteMusic: false, muteSounds: false,
-    randomBase: false, hardcore: false, endless: false, multiplayer: false 
+    randomBase: false, hardcore: false, endless: false
   });
   const optsRef = useRef(opts);
+  const isMpModeRef = useRef(false);
   
+  const [famInput, setFamInput] = useState("");
   const up = p => setUi(prev=>({...prev,...p}));
 
-  // Czyste rozłączenie socketów przy wyjściu z gry
   useEffect(() => {
      return () => {
          if (socketRef.current) socketRef.current.disconnect();
@@ -718,7 +748,8 @@ export default function PrlExit8() {
     puddle.rotation.x=-Math.PI/2; puddle.position.set(.25,.009,-17); puddle.visible=false; scene.add(puddle); ao.puddle=puddle;
     const cat=buildCat(); cat.position.set(-.75,0,-13); cat.visible=false; scene.add(cat); ao.cat=cat;
     
-    const peepholeEye = new Mesh(new THREE.PlaneGeometry(.04, .04), new THREE.MeshBasicMaterial({map:CT(mkEyeTex()), transparent:true}));
+    // POPRAWKA: Dodano brakujące THREE. przed Mesh i przed MeshBasicMaterial
+    const peepholeEye = new THREE.Mesh(new THREE.PlaneGeometry(.04, .04), new THREE.MeshBasicMaterial({map:CT(mkEyeTex()), transparent:true}));
     peepholeEye.position.set(W/2 - 0.051, 1.313, -20); peepholeEye.rotation.y = -Math.PI/2; peepholeEye.visible = false; scene.add(peepholeEye); ao.peephole_eye = peepholeEye;
     const peepholeGlow = new THREE.PointLight(0xcc0000, 0.8, 1.5); peepholeGlow.position.set(W/2 - 0.1, 1.313, -20); peepholeGlow.visible = false; scene.add(peepholeGlow); ao.peephole_glow = peepholeGlow;
 
@@ -741,22 +772,16 @@ export default function PrlExit8() {
       let ha = false;
       let activeAnoms = [];
 
-      // Jesli gramy w trybie Multiplayer i mamy dane z serwera
-      if (optsRef.current.multiplayer && sr.mpData) {
+      if (isMpModeRef.current && sr.mpData) {
           ha = sr.mpData.anomalySequence[sr.mpStep % 150];
           if (sr.exitCount === 0) ha = false; 
-
           if (ha) {
-              // Dla uproszczenia w multi zawsze losuje jedna anomalię (zależną od kroku, aby była stała)
               const anomIndex = (sr.mpStep * 7) % ANOMALIES.length;
               activeAnoms = [ANOMALIES[anomIndex]];
           }
-      } 
-      // Tryb Solo
-      else {
+      } else {
           ha = Math.random() < 0.50;
           if (sr.exitCount === 0) ha = false; 
-
           if (ha) {
               if (optsRef.current.hardcore) {
                   const count = Math.floor(Math.random() * 3) + 1; 
@@ -769,7 +794,6 @@ export default function PrlExit8() {
       }
 
       sr.hasAnomaly = ha; sr.activeAnomalies = activeAnoms; sr.decided = false; sr.tunnelLock = false;
-      
       if(sr.sanity <= 85 && Math.random() < 0.40) { sr.hasRzepa = true; sr.rzepaFound = false; } else { sr.hasRzepa = false; }
 
       const bs = sr.baseSetup || { bikeSide: 1, strollerSide: 1, messSide: 1, paintingSide: 1 };
@@ -868,7 +892,7 @@ export default function PrlExit8() {
     function decide(action){
       if(sr.phase!=="playing"||sr.decided||sr.familiadaActive)return;
       sr.decided=true;
-      sr.mpStep++; // Zwiększamy licznik kroków do multiplayera
+      sr.mpStep++; 
       
       const {hasAnomaly,exitCount,streak,sanity}=sr;
       const ok=action==="exit"?!hasAnomaly:hasAnomaly;
@@ -886,15 +910,14 @@ export default function PrlExit8() {
       
       sr.exitCount=ne; sr.streak=ns; sr.sanity=nsan; stepCount.current++;
 
-      // EMISJA POSTĘPU DO SERWERA (Multiplayer)
-      if (socketRef.current && optsRef.current.multiplayer) {
-          socketRef.current.emit('player_progress', ne);
+      if (socketRef.current && isMpModeRef.current) {
+          socketRef.current.emit('update_progress', ne);
       }
       
       if(nsan <= 0){ sr.phase="gameover"; up({phase:"gameover", sanity:nsan, exitCount:ne, streak:ns, steps:stepCount.current}); return; }
       
       if(!optsRef.current.endless && ne>=8){
-        if (socketRef.current && optsRef.current.multiplayer) socketRef.current.emit('player_won');
+        if (socketRef.current && isMpModeRef.current) socketRef.current.emit('player_won');
         sr.phase="win"; R.current.fadeMat.opacity = 1.0; 
         if(R.current.audio.amb) R.current.audio.amb.pause();
         up({phase:"win", exitCount:8, streak:ns, steps:stepCount.current});
@@ -915,7 +938,7 @@ export default function PrlExit8() {
       animId=requestAnimationFrame(animate);
       if(sr.phase==="win") { renderer.render(R.current.endScene, R.current.endCam); return; }
       
-      if(sr.phase==="playing" || sr.phase==="menu" || sr.phase==="paused" || sr.phase==="paused_options" || sr.phase==="busy" || sr.phase === "waiting_mp"){
+      if(sr.phase==="playing" || sr.phase==="menu" || sr.phase==="paused" || sr.phase==="paused_options" || sr.phase==="busy" || sr.phase === "mp_menu" || sr.phase === "lobby"){
         if (sr.phase === "playing") {
           cam.rotation.y=sr.yaw; cam.rotation.x=sr.pitch;
           let touchMoveActive = false, touchNx = 0, touchNy = 0;
@@ -964,12 +987,14 @@ export default function PrlExit8() {
           let tunnelDarkness = cam.position.x < -1.5 ? Math.min(1, (-cam.position.x - 1.5) / 2.0) : 0;
           scene.fog.density = 0.055 + (sanityFactor * 0.015) + (tunnelDarkness * 1.5); 
           const fogLuma = 3 * (1 - tunnelDarkness); scene.fog.color.setRGB(fogLuma/255, fogLuma/255, fogLuma/255);
+          
           const sa = stepsAudioRef.current;
           if(sa){
             let pbRate = isSprinting ? 1.2 : 0.8; if (sr.sanity <= 32) pbRate -= 0.3;
             if (mv && sa.paused){ sa.playbackRate = pbRate; sa.currentTime=0; sa.play().catch(()=>{}); }
             else if (!mv && !sa.paused){ sa.pause(); }
           }
+          
           if (R.current.ao?.cat?.visible) {
               const dist = cam.position.distanceTo(R.current.ao.cat.position);
               if (dist < 2.5) {
@@ -1071,10 +1096,12 @@ export default function PrlExit8() {
       if(R.current.audio && R.current.audio.amb && !optsRef.current.muteSounds) R.current.audio.amb.play().catch(()=>{});
 
       if (isMultiplayer && serverData) {
+          isMpModeRef.current = true;
           sr.mpData = serverData;
           sr.mpStep = 0;
           sr.baseSetup = serverData.baseSetup;
       } else {
+          isMpModeRef.current = false;
           sr.baseSetup = {
               bikeSide: optsRef.current.randomBase ? (Math.random() > 0.5 ? 1 : -1) : 1,
               strollerSide: optsRef.current.randomBase ? (Math.random() > 0.5 ? 1 : -1) : 1,
@@ -1088,7 +1115,7 @@ export default function PrlExit8() {
       if(R.current.cam) { R.current.cam.position.set(0, 1.52, 1.5); sr.yaw=0; sr.pitch=0; }
       
       R.current.gen?.();
-      setUi(p=>({...p, phase:"playing", exitCount:0, streak:0, sanity:100, oppExitCount:0, oppMessage:""}));
+      setUi(p=>({...p, phase:"playing", exitCount:0, streak:0, sanity:100, oppMessage:""}));
 
       let t0 = performance.now();
       const fadeIn = setInterval(() => {
@@ -1098,52 +1125,89 @@ export default function PrlExit8() {
       }, 14);
   }
 
-  const startGame = () => {
-      if (optsRef.current.multiplayer) {
-          setUi(p => ({...p, phase: "waiting_mp"}));
-          
-          // UWAGA: KIEDY WRZUCISZ NA RENDER ZMIEŃ "http://localhost:3000" NA TWÓJ ADRES
-          socketRef.current = io("http://localhost:3000"); 
-          
-          socketRef.current.emit("join_matchmaking");
-          
-          socketRef.current.on("game_start", (data) => {
-              startActualGame(true, data);
-          });
-          
-          socketRef.current.on("opponent_progress", (level) => {
-              S.current.oppExitCount = level;
-              up({ oppExitCount: level, oppMessage: `⚠️ Rywal jest na W.${level}!` });
-              setTimeout(() => up(p => ({...p, oppMessage: ""})), 4000);
+  // ─── LOGIKA MULTIPLAYERA (SOCKET.IO) ───
+  const initSocket = () => {
+      if (!socketRef.current) {
+          // UWAGA: GDY ZBUDUJESZ BACKEND NA RENDER.COM ZMIEŃ TEN LINK!
+          socketRef.current = io("https://zerroty-server.onrender.com"); 
+
+          socketRef.current.on("room_update", (roomData) => {
+              setMpState(p => ({...p, currentRoom: roomData, error: ""}));
+              S.current.phase = "lobby";
+              up({ phase: "lobby" });
           });
 
-          socketRef.current.on("opponent_won", () => {
+          socketRef.current.on("room_error", (err) => {
+              setMpState(p => ({...p, error: err}));
+          });
+
+          socketRef.current.on("game_started", (data) => {
+              startActualGame(true, data);
+          });
+
+          socketRef.current.on("progress_updated", (data) => {
+              setMpState(p => {
+                  const newProg = {...p.opponentsProgress};
+                  newProg[data.id] = { name: data.name, progress: data.progress };
+                  return {...p, opponentsProgress: newProg};
+              });
+          });
+
+          socketRef.current.on("game_over_winner", (winnerName) => {
               S.current.phase = "gameover_lost_race";
-              up({ phase: "gameover_lost_race" });
+              up({ phase: "gameover_lost_race", oppMessage: winnerName });
           });
           
-          socketRef.current.on("opponent_disconnected", () => {
-              up({ oppMessage: `🔌 Rywal uciekł (rozłączono)!` });
+          socketRef.current.on("player_left", (playerName) => {
+              up({ oppMessage: `🔌 Graczy ${playerName} opuścił grę!` });
               setTimeout(() => up(p => ({...p, oppMessage: ""})), 4000);
           });
-      } else {
-          startActualGame(false);
       }
-  };
+  }
+
+  const goToMpMenu = () => {
+      initSocket();
+      S.current.phase = "mp_menu";
+      up({phase: "mp_menu"});
+  }
+
+  const createRoom = () => {
+      if(mpState.playerName.trim() === "") return;
+      socketRef.current.emit("create_room", mpState.playerName);
+  }
+
+  const joinRoom = () => {
+      if(mpState.playerName.trim() === "" || mpState.roomCodeInput.trim().length !== 4) return;
+      socketRef.current.emit("join_room", { code: mpState.roomCodeInput, playerName: mpState.playerName });
+  }
+
+  const startMultiplayerGame = () => {
+      socketRef.current.emit("start_game");
+  }
+
+  const disconnectAndReturn = () => {
+      if(socketRef.current) {
+          socketRef.current.disconnect();
+          socketRef.current = null;
+      }
+      setMpState(p => ({...p, currentRoom: null, opponentsProgress: {}}));
+      S.current.phase = "menu";
+      up({phase: "menu"});
+  }
 
   const restart=()=>{
     const sr=S.current; Object.assign(sr,{phase:"menu",hasAnomaly:false,anomaly:null,exitCount:0,streak:0,sanity:100,yaw:0,pitch:0,keys:{},decided:false,tunnelLock:false,_lastCatPrompt:"0",_lastRzepaHint:false,hasRzepa:false,rzepaFound:false,familiadaActive:false,vel:0,lastDirX:0,lastDirY:0,flashlightOn:false,lastHitTime:0,lastTvHit:0});
     stepCount.current=0; if(R.current.cam)R.current.cam.position.set(0,1.52,1.5); 
-    if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+    disconnectAndReturn();
     if(ambienceRef.current){ambienceRef.current.pause();}
     if(R.current.fadeMat) R.current.fadeMat.opacity = 0; 
     if(R.current.flashlight) R.current.flashlight.intensity = 0;
     if(R.current.audio && R.current.audio.chopin){R.current.audio.chopin.currentTime=0; if(!optsRef.current.muteMusic) R.current.audio.chopin.play().catch(()=>{});}
-    setUi({phase:"menu",exitCount:0,streak:0,sanity:100,message:"",hint:false, hintText:"", steps:0, anomaly:null,hasAnomaly:false,rzepaHint:false,catPrompt:"",catMessage:"", tvPrompt: false, showHelp: false, oppExitCount: 0, oppMessage: "", familiada: { active: false, qId: 0, step: 'none', points: 0, ansText: "" }});
+    setUi({phase:"menu",exitCount:0,streak:0,sanity:100,message:"",hint:false, hintText:"", steps:0, anomaly:null,hasAnomaly:false,rzepaHint:false,catPrompt:"",catMessage:"", tvPrompt: false, showHelp: false, oppMessage: "", familiada: { active: false, qId: 0, step: 'none', points: 0, ansText: "" }});
     setFamInput("");
   };
 
-  const {phase,exitCount,streak,sanity,message,hint, hintText, steps,hasAnomaly,catPrompt,catMessage, tvPrompt, familiada, showHelp, oppExitCount, oppMessage}=ui;
+  const {phase,exitCount,streak,sanity,message,hint, hintText, steps,hasAnomaly,catPrompt,catMessage, tvPrompt, familiada, showHelp, oppMessage}=ui;
   const isMobile=typeof window!=="undefined"&&window.innerWidth<768;
   const btnStyle = { padding:"15px", background:"transparent", border:"2px solid #d8b860", color:"#d8b860", fontSize:"18px", fontWeight:"bold", cursor:"pointer", transition:"0.2s", width: "100%", textAlign: "center" };
 
@@ -1154,24 +1218,15 @@ export default function PrlExit8() {
       <style>
         {`
           @keyframes vhs-anim { 0% { background-position: 0 0; } 100% { background-position: 0 10px; } }
+          @keyframes pulse-anim { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
           .fam-board { background-color: #1a1a1a; background-image: linear-gradient(rgba(0,0,0,0.8) 2px, transparent 2px), linear-gradient(90deg, rgba(0,0,0,0.8) 2px, transparent 2px); background-size: 14px 24px; border: 6px solid #333; border-radius: 8px; padding: 20px; box-shadow: inset 0 0 40px #000; width: 100%; margin-bottom: 20px; }
           .fam-text { font-family: 'Courier New', monospace; color: #a8cc14; text-shadow: 0 0 6px rgba(168,204,20,0.8); font-weight: bold; font-size: 22px; text-transform: uppercase; letter-spacing: 4px; }
           .opt-section { color: #d8b860; border-bottom: 1px solid #333; padding-bottom: 5px; margin-bottom: 15px; font-weight: bold; width: 100%; text-align: left; text-transform: uppercase;}
         `}
       </style>
 
-      {opts.vhs && phase !== "menu" && phase !== "waiting_mp" && (
+      {opts.vhs && phase !== "menu" && phase !== "mp_menu" && phase !== "lobby" && (
         <div style={{ position: "absolute", inset: 0, zIndex: 20, pointerEvents: "none", mixBlendMode: "overlay", opacity: (ui.anomaly && ui.anomaly.id === "fake_tv_button" && ui.message) ? 1.0 : 0.8, background: "repeating-linear-gradient(rgba(0,0,0,0), rgba(0,0,0,0) 3px, rgba(0,0,0,0.8) 3px, rgba(0,0,0,0.8) 6px)", animation: "vhs-anim 0.15s linear infinite" }}/>
-      )}
-
-      {/* EKRAN CZEKANIA NA RYWALA */}
-      {phase==="waiting_mp" && (
-          <div style={{position:"absolute", inset:0, zIndex: 100, background:"rgba(0,0,0,0.9)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center"}}>
-              <h1 style={{color:"#d8b860", fontSize: "32px", textShadow:"0 0 20px rgba(216,184,96,0.6)", marginBottom:"30px", textAlign:"center"}}>SZUKAM PRZECIWNIKA...</h1>
-              <div style={{width: "40px", height: "40px", border: "4px solid rgba(200,168,64,0.3)", borderTop: "4px solid #d8b860", borderRadius: "50%", animation: "spin 1s linear infinite", marginBottom: "30px"}}></div>
-              <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
-              <button onClick={restart} style={{...btnStyle, width: "200px", borderColor:"#a82020", color:"#a82020"}}>ANULUJ</button>
-          </div>
       )}
 
       {/* MENU GŁÓWNE */}
@@ -1180,10 +1235,68 @@ export default function PrlExit8() {
               <h1 style={{color:"#d8b860", fontSize: isMobile ? "32px" : "64px", textShadow:"0 0 20px rgba(216,184,96,0.6)", marginBottom:"10px", textAlign:"center"}}>POLISH ANOMALIES</h1>
               <p style={{color:"#888", fontSize:"14px", marginBottom:"50px", letterSpacing:"3px"}}>KORYTARZ EDITION</p>
               <div style={{display:"flex", flexDirection:"column", gap:"20px", width: "200px"}}>
-                  <button onClick={startGame} style={btnStyle}>START</button>
+                  <button onClick={() => startActualGame(false)} style={btnStyle}>START SOLO</button>
+                  <button onClick={goToMpMenu} style={{...btnStyle, borderColor:"#a86020", color:"#a86020"}}>MULTIPLAYER</button>
                   <button onClick={()=>setUi(p=>({...p, phase:"options"}))} style={{...btnStyle, borderColor:"#555", color:"#aaa"}}>OPCJE</button>
               </div>
               <div style={{position:"absolute", bottom: 20, color:"#444", fontSize:"10px"}}>Muzyka: F. Chopin</div>
+          </div>
+      )}
+
+      {/* MENU MULTIPLAYER (Tworzenie i Dołączanie) */}
+      {phase==="mp_menu" && (
+          <div style={{position:"absolute", inset:0, zIndex: 100, background:"rgba(0,0,0,0.9)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center"}}>
+              <h2 style={{color:"#d8b860", fontSize:"32px", marginBottom:"30px", textShadow:"0 0 10px rgba(216,184,96,0.5)"}}>TRYB MULTIPLAYER</h2>
+              
+              {mpState.error && <div style={{color:"#ff4444", marginBottom:"15px", background:"rgba(255,0,0,0.1)", padding:"10px", borderRadius:"4px", border:"1px solid #ff4444"}}>{mpState.error}</div>}
+              
+              <div style={{marginBottom:"40px", textAlign:"center"}}>
+                  <div style={{color:"#aaa", fontSize:"14px", marginBottom:"10px"}}>TWÓJ NICK (Wyświetlany innym):</div>
+                  <input value={mpState.playerName} onChange={e=>setMpState(p=>({...p, playerName: e.target.value.substring(0,12)}))} style={{background:"#111", border:"1px solid #d8b860", color:"#fff", padding:"10px", textAlign:"center", fontSize:"18px", width:"220px", borderRadius:"4px", outline:"none"}} />
+              </div>
+
+              <div style={{display:"flex", flexDirection: isMobile ? "column" : "row", gap:"30px"}}>
+                  <div style={{border:"1px solid #333", padding:"30px", display:"flex", flexDirection:"column", alignItems:"center", width:"260px", borderRadius:"8px", background:"#0a0a0a"}}>
+                      <div style={{color:"#fff", marginBottom:"20px", fontSize:"18px", letterSpacing:"2px"}}>NOWA GRA</div>
+                      <button onClick={createRoom} style={{...btnStyle, width:"100%"}}>STWÓRZ POKÓJ</button>
+                  </div>
+                  <div style={{border:"1px solid #333", padding:"30px", display:"flex", flexDirection:"column", alignItems:"center", width:"260px", borderRadius:"8px", background:"#0a0a0a"}}>
+                      <div style={{color:"#fff", marginBottom:"20px", fontSize:"18px", letterSpacing:"2px"}}>DOŁĄCZ DO GRY</div>
+                      <input placeholder="KOD POKOJU" value={mpState.roomCodeInput} onChange={e=>setMpState(p=>({...p, roomCodeInput: e.target.value.toUpperCase().substring(0,4)}))} style={{background:"#111", border:"1px solid #555", color:"#d8b860", padding:"10px", textAlign:"center", fontSize:"22px", width:"100%", marginBottom:"15px", letterSpacing:"10px", borderRadius:"4px", outline:"none", textTransform:"uppercase"}} />
+                      <button onClick={joinRoom} style={{...btnStyle, borderColor:"#555", color:"#aaa", width:"100%"}}>DOŁĄCZ</button>
+                  </div>
+              </div>
+              <button onClick={disconnectAndReturn} style={{...btnStyle, width:"200px", marginTop:"40px", borderColor:"#555", color:"#aaa"}}>WRÓĆ DO MENU</button>
+          </div>
+      )}
+
+      {/* LOBBY POKOJU */}
+      {phase==="lobby" && mpState.currentRoom && (
+          <div style={{position:"absolute", inset:0, zIndex: 100, background:"rgba(0,0,0,0.9)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center"}}>
+              <h2 style={{color:"#fff", fontSize:"24px", marginBottom:"20px"}}>POKÓJ: <span style={{color:"#d8b860", fontSize:"48px", letterSpacing:"5px"}}>{mpState.currentRoom.id}</span></h2>
+              <div style={{color:"#888", fontSize:"12px", marginBottom:"30px"}}>Przekaż ten kod znajomemu, aby mógł dołączyć.</div>
+              
+              <div style={{border:"1px solid #333", padding:"20px", width:"300px", marginBottom:"40px", background:"#0a0a0a", borderRadius:"8px"}}>
+                  <div style={{color:"#aaa", borderBottom:"1px solid #333", paddingBottom:"10px", marginBottom:"15px", display:"flex", justifyContent:"space-between"}}>
+                      <span>GRACZE W POKOJU:</span>
+                      <span>{mpState.currentRoom.players.length}/4</span>
+                  </div>
+                  {mpState.currentRoom.players.map((p, idx) => (
+                      <div key={p.id} style={{color: p.id === socketRef.current?.id ? "#d8b860" : "#fff", fontSize:"18px", padding:"8px 0", display:"flex", alignItems:"center"}}>
+                          <span style={{marginRight:"10px", color:"#555"}}>{idx + 1}.</span> 
+                          {p.name} {p.id === socketRef.current?.id ? '(Ty)' : ''}
+                          {p.id === mpState.currentRoom.host && <span style={{fontSize:"10px", color:"#a86020", border:"1px solid #a86020", padding:"2px 5px", borderRadius:"3px", marginLeft:"auto"}}>HOST</span>}
+                      </div>
+                  ))}
+              </div>
+
+              {mpState.currentRoom.host === socketRef.current?.id ? (
+                  <button onClick={startMultiplayerGame} style={{...btnStyle, width:"300px"}}>ROZPOCZNIJ GRĘ ONLINE</button>
+              ) : (
+                  <div style={{color:"#d8b860", fontSize:"18px", animation: "pulse-anim 1.5s infinite", padding:"15px"}}>Oczekiwanie, aż Host rozpocznie...</div>
+              )}
+              
+              <button onClick={disconnectAndReturn} style={{...btnStyle, width:"300px", marginTop:"20px", borderColor:"#a82020", color:"#a82020"}}>OPUŚĆ POKÓJ</button>
           </div>
       )}
 
@@ -1193,7 +1306,7 @@ export default function PrlExit8() {
               <h2 style={{color:"#d8b860", fontSize:"32px", marginBottom:"30px"}}>OPCJE GRY</h2>
               <div style={{display:"flex", flexDirection:"column", gap:"15px", width: "350px", marginBottom: "40px"}}>
                   
-                  <div className="opt-section">ROZGRYWKA</div>
+                  <div className="opt-section">ROZGRYWKA (Tylko Solo)</div>
                   <label style={{color:"#fff", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>
                       Losowa Baza (Różne strony)
                       <input type="checkbox" checked={opts.randomBase} onChange={(e)=>setOpts(p=>({...p, randomBase: e.target.checked}))} style={{transform:"scale(1.5)"}}/>
@@ -1205,10 +1318,6 @@ export default function PrlExit8() {
                   <label style={{color:"#fff", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>
                       Tryb Roguelike (Nieskończoność)
                       <input type="checkbox" checked={opts.endless} onChange={(e)=>setOpts(p=>({...p, endless: e.target.checked}))} style={{transform:"scale(1.5)"}}/>
-                  </label>
-                  <label style={{color:"#ffaaaa", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer", fontWeight:"bold"}}>
-                      TRYB MULTIPLAYER (ONLINE)
-                      <input type="checkbox" checked={opts.multiplayer} onChange={(e)=>setOpts(p=>({...p, multiplayer: e.target.checked}))} style={{transform:"scale(1.5)"}}/>
                   </label>
 
                   <div className="opt-section" style={{marginTop: "15px"}}>AUDIO / WIDEO</div>
@@ -1246,12 +1355,6 @@ export default function PrlExit8() {
           <div style={{position:"absolute", inset:0, zIndex: 100, background:"#0a0a0a", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", overflowY:"auto", padding: "40px 0"}}>
               <h2 style={{color:"#d8b860", fontSize:"32px", marginBottom:"30px"}}>OPCJE GRY</h2>
               <div style={{display:"flex", flexDirection:"column", gap:"15px", width: "350px", marginBottom: "40px"}}>
-                  <div className="opt-section">ROZGRYWKA</div>
-                  <label style={{color:"#fff", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>Losowa Baza (Różne strony)<input type="checkbox" checked={opts.randomBase} onChange={(e)=>setOpts(p=>({...p, randomBase: e.target.checked}))} style={{transform:"scale(1.5)"}}/></label>
-                  <label style={{color:"#fff", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>Tryb Hardcore (Mix anomalii)<input type="checkbox" checked={opts.hardcore} onChange={(e)=>setOpts(p=>({...p, hardcore: e.target.checked}))} style={{transform:"scale(1.5)"}}/></label>
-                  <label style={{color:"#fff", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>Tryb Roguelike (Nieskończoność)<input type="checkbox" checked={opts.endless} onChange={(e)=>setOpts(p=>({...p, endless: e.target.checked}))} style={{transform:"scale(1.5)"}}/></label>
-                  <label style={{color:"#ffaaaa", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer", fontWeight:"bold"}}>Tryb Multiplayer (Online)<input type="checkbox" checked={opts.multiplayer} onChange={(e)=>setOpts(p=>({...p, multiplayer: e.target.checked}))} style={{transform:"scale(1.5)"}}/></label>
-
                   <div className="opt-section" style={{marginTop: "15px"}}>AUDIO / WIDEO</div>
                   <label style={{color:"#fff", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>Efekt Kasety VHS<input type="checkbox" checked={opts.vhs} onChange={(e)=>setOpts(p=>({...p, vhs: e.target.checked}))} style={{transform:"scale(1.5)"}}/></label>
                   <label style={{color:"#fff", fontSize:"14px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer"}}>Wycisz muzykę (Menu)<input type="checkbox" checked={opts.muteMusic} onChange={(e)=>setOpts(p=>({...p, muteMusic: e.target.checked}))} style={{transform:"scale(1.5)"}}/></label>
@@ -1284,12 +1387,21 @@ export default function PrlExit8() {
             <div style={{width:`${sanity}%`,height:"100%",background:sanity>50?"#c8a840":sanity>32?"#c86020":"#a82020",transition:"all .4s ease-out"}}/>
           </div>
         </div>
+
+        {/* HUD MULTIPLAYER (Wyniki) */}
         <div style={{position:"absolute", zIndex: 50, top:8,right:12,color:"#c8a840",fontSize:"10px",letterSpacing:"2px",textAlign:"right",lineHeight:"1.6"}}>
-          <div>{opts.multiplayer ? "Ty: " : ""}W.{exitCount}{opts.endless ? "" : "/8"}</div>
-          <div style={{color:"#444"}}>×{streak}</div>
+          <div>{isMpModeRef.current ? "TY: " : ""}W.{exitCount}{opts.endless ? "" : "/8"}</div>
+          <div style={{color:"#444", marginBottom:"10px"}}>×{streak}</div>
           
-          {opts.multiplayer && (
-             <div style={{marginTop: "5px", color:"#ff6666", fontWeight:"bold"}}>Rywal: W.{oppExitCount}{opts.endless ? "" : "/8"}</div>
+          {isMpModeRef.current && mpState.currentRoom && (
+              <div style={{background:"rgba(0,0,0,0.7)", border:"1px solid #333", padding:"8px", borderRadius:"4px", textAlign:"left"}}>
+                  <div style={{color:"#888", fontSize:"9px", marginBottom:"5px", borderBottom:"1px solid #333", paddingBottom:"3px"}}>RYWALE:</div>
+                  {mpState.currentRoom.players.filter(p => p.id !== socketRef.current?.id).map(p => (
+                      <div key={p.id} style={{color:"#ff6666", fontSize:"11px", fontWeight:"bold", marginTop:"4px"}}>
+                          {p.name}: W.{mpState.opponentsProgress[p.id]?.progress || 0}/8
+                      </div>
+                  ))}
+              </div>
           )}
         </div>
 
@@ -1312,8 +1424,8 @@ export default function PrlExit8() {
           </div>
         )}
 
-        {/* Komunikat o Rywalu */}
-        {opts.multiplayer && oppMessage && (
+        {/* Komunikat z powiadomieniami MP */}
+        {oppMessage && (
            <div style={{position:"absolute", zIndex: 50, top: isMobile ? 120 : 80, left:"50%",transform:"translateX(-50%)",background:"rgba(168,32,32,.85)",border:"1px solid #ff4444",color:"#fff",padding:"7px 20px",borderRadius:2,fontSize:"13px",letterSpacing:"1px",whiteSpace:"nowrap", fontWeight:"bold"}}>
              {oppMessage}
            </div>
@@ -1387,7 +1499,7 @@ export default function PrlExit8() {
         <div style={{position:"absolute", zIndex: 100, inset:0,background:"rgba(10,0,0,.96)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
           <div style={{fontSize:56}}>🏃💨</div>
           <div style={{color:"#a82020",fontSize:isMobile?"18px":"22px",letterSpacing:"4px",textAlign:"center"}}>RYWAL UCIEKŁ PIERWSZY</div>
-          <div style={{color:"#662020",fontSize:"10px",letterSpacing:"2px",marginTop:4}}>Zostałeś sam w korytarzu... na zawsze.</div>
+          <div style={{color:"#662020",fontSize:"10px",letterSpacing:"2px",marginTop:4}}>Zostałeś sam w korytarzu... ({oppMessage})</div>
           <div style={{color:"#d8b860",fontSize:"14px", marginTop: "10px"}}>Twój wynik: W.{exitCount}</div>
           <button onClick={restart} style={{...btnStyle, width: "200px", borderColor:"#a82020", color:"#a82020", marginTop: "20px"}}> WRÓĆ DO MENU </button>
         </div>
@@ -1395,3 +1507,11 @@ export default function PrlExit8() {
     </div>
   );
 }
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <PrlExit8Game />
+    </ErrorBoundary>
+  );
+} 
