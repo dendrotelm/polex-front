@@ -1,0 +1,1986 @@
+import { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import { io } from "socket.io-client";
+
+// BEZPOŚREDNI IMPORT ZDJĘĆ - to rozwiązuje problem z czarną piłką i brakiem tła!
+// (Upewnij się, że pliki ball.jpg i abandonedpitch.jpg są w tym samym folderze co App.jsx)
+import ballImg from './ball.jpg';
+import pitchImg from './abandonedpitch.jpg';
+
+// ==========================================
+// KONFIGURACJA SERWERA ONLINE
+// ==========================================
+const SERVER_URL = "https://beki-server.onrender.com"; 
+let socket = null;
+
+// KLASYCZNE WYMIARY BOISKA
+const FW=22,FD=16,FH=5,GW=5.0,GH=2.6,GD=1.2,BR=0.32,PR=0.46;
+const hw=FW/2,hd=FD/2;
+const BUMP_R=1.0;
+const BUMPERS=[[-hw+2.5,0],[hw-2.5,0]];
+
+const BOT_CFG={
+  nowicjusz:   {spd: 4.0, pred: 0.0, kickR: 1.2, reactDelay: 0.60, jumpP: 0.00, fakeP: 0.0},
+  sredni:      {spd: 6.5, pred: 0.3, kickR: 1.5, reactDelay: 0.20, jumpP: 0.10, fakeP: 0.1},
+  zaawansowany:{spd: 9.0, pred: 0.6, kickR: 1.8, reactDelay: 0.05, jumpP: 0.35, fakeP: 0.3},
+  hardcore:    {spd:12.0, pred: 0.9, kickR: 2.8, reactDelay: 0.00, jumpP: 0.80, fakeP: 0.6},
+};
+
+const DASH_DURATION=0.18,DASH_SPEED=22,DASH_COOLDOWN=2.2;
+const CONTACT_STIFFNESS=420,CONTACT_DAMPING=18,BALL_MASS=1.0,PLAYER_MASS=2.5;
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+const i18n = {
+  en: {
+    playBot: "▶ Play vs Bot", playLocal: "▶ Local Multiplayer",
+    playOnlineCreate: "🌐 Create ONLINE Game", playOnlineJoin: "🌐 Join ONLINE Game",
+    botDiff: "Bot Difficulty", players: "Format:", timeLimit: "Time Limit:",
+    nowicjusz: "Novice", sredni: "Medium", zaawansowany: "Advanced", hardcore: "Hardcore",
+    controls: "Controls", mouseKbd: "Mouse (PC)", kbdOnly: "Keyboard / Touch",
+    color: "Your Color:", limit: "Score Limit:", goals: "Goals",
+    joinCode: "Room Code", joinBtn: "JOIN", backBtn: "Back", cancel: "Cancel",
+    playerName: "Your Name:",
+    controlsMapMouse: [['WASD','Move'],['Mouse','Aim'],['LMB (Hold & Release)','Power Shot + Curve (drag)'],['LMB (Quick tap)','Flick (Lob)'],['C','Pass (Ground)'],['Space','Jump / Wallride'],['Shift','Sprint']],
+    controlsMapKbd: [['WASD','Move'],['F (Hold & Release)','Power Shot'],['F (Quick tap)','Flick (Lob)'],['Q (Hold) + A/D','Curve Shot'],['E','Flick (Lob)'],['C','Pass (Ground)'],['Space','Jump / Wallride'],['Shift','Sprint']],
+    controlsMapGamepad: [['L-Stick','Move'],['R-Stick','Aim / Curve'],['RT / R2','Power Shot'],['RB / R1','Flick'],['X / Square','Pass (Ground)'],['A / Cross','Jump'],['B / Circle','Sprint / Dash']],
+    waitOpponent: "Waiting for players...", giveCode: "Give this code to the players:",
+    offlineErr: "Servers are offline - please try again later!",
+    nameInUse: "This name is already taken in this room!",
+    leave: "← Leave", host: "You (Host)", client: "You (Joined)", opponent: "Opponent",
+    p1: "Player 1", p2: "Player 2", p3: "Player 3", p4: "Player 4", bot: "Bot",
+    dashReady: "Dash Ready!", dashWait: "Dash",
+    gameOver: "Game Over!", rematch: "🔁 Rematch", draw: "DRAW!",
+    winnerYou: "You Won!", loserYou: "You Lost!", winnerOpp: "Opponent Wins!",
+    winnerTeamA: "Blue Team Wins!", winnerTeamB: "Red Team Wins!",
+    chatPlaceholder: "Type a message...",
+    p2LocalHint: "* P2 (Local): Arrows + Num0(Shoot), Num1(Curve), Num2(Flick), Num3(Pass), RShift(Jump), Enter(Dash)",
+    leaderboard: "🏆 Leaderboard", elo: "Your Points:", loading: "Loading...",
+    helpTitle: "🎮 How to play",
+    lobbyTitle: "Match Lobby", ready: "READY", notReady: "NOT READY", startMatch: "START MATCH",
+    lobbyWait: "Waiting for others to be ready..."
+  },
+  pl: {
+    playBot: "▶ Gra vs Bot", playLocal: "▶ Lokalny multiplayer",
+    playOnlineCreate: "🌐 Stwórz grę ONLINE", playOnlineJoin: "🌐 Dołącz do gry ONLINE",
+    botDiff: "Trudność bota", players: "Format:", timeLimit: "Czas gry:",
+    nowicjusz: "Nowicjusz", sredni: "Średni", zaawansowany: "Zaawansowany", hardcore: "Hardcore",
+    controls: "Sterowanie", mouseKbd: "Myszka (PC)", kbdOnly: "Klawiatura / Dotyk",
+    color: "Twój kolor:", limit: "Graj do:", goals: "Goli",
+    joinCode: "Kod pokoju", joinBtn: "DOŁĄCZ", backBtn: "Wróć", cancel: "Anuluj",
+    playerName: "Twoja nazwa:",
+    controlsMapMouse: [['WASD','Ruch'],['Myszka','Celowanie'],['LPM (Trzymaj i Puść)','Siła + Podkręcenie (przeciągnij)'],['LPM (Szybki klik)','Krótka podcinka'],['C','Szybkie podanie'],['Spacja','Skok / Wallride'],['Shift','Sprint']],
+    controlsMapKbd: [['WASD','Ruch'],['F (Trzymaj i Puść)','Prosty Strzał'],['F (Szybki klik)','Podcinka'],['Q (Trzymaj) + A/D','Podkręcony Strzał'],['E','Podcinka'],['C','Podanie'],['Spacja','Skok / Wallride'],['Shift','Sprint']],
+    controlsMapGamepad: [['L-Analog','Ruch'],['R-Analog','Celowanie/Rogal'],['RT / R2','Silny Strzał'],['RB / R1','Podcinka'],['X / Kwadrat','Szybkie podanie'],['A / Krzyżyk','Skok'],['B / Kółko','Sprint']],
+    waitOpponent: "Oczekiwanie na graczy...", giveCode: "Podaj ten kod graczom:",
+    offlineErr: "Serwery są offline - spróbuj za chwilę!",
+    nameInUse: "Ta nazwa jest już zajęta w tym pokoju!",
+    leave: "← Wyjdź", host: "Ty (Host)", client: "Ty (Dołączyłeś)", opponent: "Przeciwnik",
+    p1: "Gracz 1", p2: "Gracz 2", p3: "Gracz 3", p4: "Gracz 4", bot: "Bot",
+    dashReady: "Sprint Gotowy!", dashWait: "Sprint",
+    gameOver: "Koniec meczu!", rematch: "🔁 Rewanż", draw: "REMIS!",
+    winnerYou: "Wygrałeś!", loserYou: "Przegrałeś!", winnerOpp: "Przeciwnik Wygrywa!",
+    winnerTeamA: "Niebiescy Wygrywają!", winnerTeamB: "Czerwoni Wygrywają!",
+    chatPlaceholder: "Napisz wiadomość...",
+    p2LocalHint: "* P2 (Lokalnie): Strzałki + Num0(Strzał), Num1(Rogal), Num2(Podcinka), Num3(Podanie), RShift(Skok), Enter(Sprint)",
+    leaderboard: "🏆 Ranking Globalny", elo: "Twoje Punkty:", loading: "Wczytywanie...",
+    helpTitle: "🎮 Sterowanie",
+    lobbyTitle: "Poczekalnia", ready: "GOTOWY", notReady: "NIEGOTOWY", startMatch: "START MECZU",
+    lobbyWait: "Oczekiwanie na gotowość graczy..."
+  }
+};
+
+function Menu({onStart, lang, setLang, theme, setTheme, onInteract, musicPlaying, setMusicPlaying}){
+  const t = i18n[lang];
+  const [diff,setDiff]=useState('sredni');
+  const [controls, setControls] = useState('mouse'); 
+  const [playerColor, setPlayerColor] = useState('#00ffaa'); 
+  const [playerName, setPlayerName] = useState(() => localStorage.getItem('beki_name') || '');
+  const [scoreLimit, setScoreLimit] = useState(5); 
+  const [timeLimit, setTimeLimit] = useState(300);
+  const [is2v2, setIs2v2] = useState(false);
+  const [hov,setHov]=useState(null);
+  
+  const [showJoin, setShowJoin] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  
+  const [isWaiting, setIsWaiting] = useState(false);
+  
+  const isHostRef = useRef(false);
+  const roleRef = useRef("p1");
+  const roomIdRef = useRef("");
+  
+  const [role, setRole] = useState("p1");
+  const [roomId, setRoomId] = useState("");
+  
+  const [lobbyStatus, setLobbyStatus] = useState({ joined: 1, max: 1, players: [], host: null });
+  const [playerElo, setPlayerElo] = useState(0); 
+  const [leaderboardData, setLeaderboardData] = useState([]);
+  
+  const [lobbyChat, setLobbyChat] = useState([]);
+  const [lobbyChatInp, setLobbyChatInp] = useState("");
+
+  const isDark = theme === 'dark';
+  const audioRef = useRef(null);
+
+  useEffect(() => {
+    if (!audioRef.current) {
+        audioRef.current = new Audio('/anton_vlasov-slow-trap-18565.mp3');
+        audioRef.current.loop = true;
+        audioRef.current.volume = 0.35;
+    }
+
+    if (!socket) socket = io(SERVER_URL);
+    
+    const name = playerName || `Player_${Math.floor(Math.random()*9999)}`;
+    socket.emit('registerPlayer', name);
+    socket.emit('getLeaderboard');
+
+    socket.on('playerData', (data) => { if(data.points !== undefined) setPlayerElo(data.points); });
+    socket.on('leaderboardData', (data) => { setLeaderboardData(data); });
+
+    socket.on('roomCreated', (data) => { 
+        setRoomId(data.roomId); roomIdRef.current = data.roomId;
+        setRole(data.role); roleRef.current = data.role;
+        setIsWaiting(true); isHostRef.current = true;
+        setLobbyStatus({joined:1, max: is2v2?4:2}); 
+    });
+    
+    socket.on('joinedRoom', (data) => { 
+        if (!isHostRef.current) {
+            setRoomId(data.roomId); roomIdRef.current = data.roomId;
+            setRole(data.role); roleRef.current = data.role;
+            isHostRef.current = false;
+            setIsWaiting(true);
+        }
+    });
+    
+    socket.on('lobbyUpdate', (data) => { 
+        setLobbyStatus(data); 
+        if (socket.id === data.host) isHostRef.current = true;
+        
+        if (data.players) {
+            const others = data.players.filter(p => p.id !== socket.id);
+            if (others.some(p => p.name === playerName)) {
+                const uniqueName = playerName + '_' + Math.floor(Math.random() * 99);
+                setPlayerName(uniqueName);
+                localStorage.setItem('beki_name', uniqueName);
+            }
+        }
+    });
+
+    socket.on('chatMessage', (msgObj) => {
+        setLobbyChat(prev => [...prev, msgObj].slice(-20));
+    });
+    
+    socket.on('gameStarted', (data) => { 
+      const limit = data?.limit || scoreLimit;
+      const tLimit = data?.timeLimit !== undefined ? data.timeLimit : timeLimit;
+      const remote2v2 = data?.is2v2 || false;
+      
+      onStart({ 
+          mode: isHostRef.current ? 'online-host' : 'online-client', 
+          role: roleRef.current, 
+          roomId: roomIdRef.current || joinCode, 
+          controls, difficulty: diff, playerColor, playerName, scoreLimit: limit, timeLimit: tLimit, is2v2: isHostRef.current ? is2v2 : remote2v2 
+      }); 
+    });
+    
+    socket.on('errorMsg', (msg) => { 
+      if (msg.includes('name') || msg.includes('nazwa')) alert(t.nameInUse);
+      else alert(msg); 
+      setIsWaiting(false); 
+    });
+    
+    return () => { 
+      if(audioRef.current) audioRef.current.pause();
+      if(socket) { socket.off('roomCreated'); socket.off('joinedRoom'); socket.off('lobbyUpdate'); socket.off('gameStarted'); socket.off('errorMsg'); socket.off('playerData'); socket.off('leaderboardData'); socket.off('chatMessage'); }
+    };
+  }, [isWaiting, joinCode, onStart, controls, diff, playerColor, playerName, scoreLimit, timeLimit, is2v2, t]);
+
+  useEffect(() => {
+    if (musicPlaying && audioRef.current) {
+        const playPromise = audioRef.current.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => console.log("Autoplay blocked."));
+        }
+    } else if (audioRef.current) {
+        audioRef.current.pause();
+    }
+  }, [musicPlaying]);
+
+  const handleCreateOnline = () => { 
+    if (!socket || !socket.connected) return alert(t.offlineErr); 
+    const name = playerName.trim() || `Player_${Math.random().toString(36).substr(2,4).toUpperCase()}`;
+    socket.emit('createRoom', {limit: scoreLimit, timeLimit, is2v2, playerName: name}); 
+  };
+  
+  const handleJoinOnline = () => { 
+    if (!socket || !socket.connected) return alert(t.offlineErr); 
+    if (!joinCode) return alert(lang === 'pl' ? "Wpisz kod pokoju!" : "Enter room code!");
+    const name = playerName.trim() || `Player_${Math.random().toString(36).substr(2,4).toUpperCase()}`;
+    socket.emit('joinRoom', { roomId: joinCode.toUpperCase(), playerName: name }); 
+  };
+
+  const sendLobbyChat = (e) => {
+      e.preventDefault();
+      if (!lobbyChatInp.trim()) return;
+      socket.emit('chatMessage', { text: lobbyChatInp.trim(), sender: playerName, roomId: roomIdRef.current });
+      setLobbyChatInp("");
+  };
+
+  const st = {
+      wrapper: {
+          position:'fixed', top:0, left:0, right:0, bottom:0, overflow:'auto', fontFamily:'Tahoma,Geneva,sans-serif',
+          background: isDark ? 'radial-gradient(circle at center, #0f172a 0%, #020617 100%)' : 'radial-gradient(circle at center, #f8fafc 0%, #cbd5e1 100%)',
+          color: isDark ? '#f8fafc' : '#0f172a', transition: 'background 0.3s ease'
+      },
+      card: {
+          position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)',
+          width:'90%', maxWidth: 640, padding:'30px 40px', borderRadius:20,
+          background: isDark ? 'rgba(30, 41, 59, 0.6)' : 'rgba(255, 255, 255, 0.8)',
+          boxShadow: isDark ? '0 0 50px rgba(0, 255, 170, 0.1), 0 20px 40px rgba(0,0,0,0.5)' : '0 16px 40px rgba(0,0,0,0.1)',
+          border: isDark ? '1px solid rgba(0, 255, 170, 0.2)' : '1px solid rgba(255,255,255,0.6)',
+          backdropFilter: 'blur(20px)', transition: 'all 0.3s ease'
+      },
+      title: { fontSize:58, fontWeight:'900', lineHeight:1, letterSpacing:2, textShadow: isDark ? '0 0 20px rgba(0,255,170,0.5)' : '0 4px 10px rgba(0,0,0,0.1)', color: isDark ? '#00ffaa' : '#111' },
+      subtitle: { fontSize:12, letterSpacing:4, textTransform:'uppercase', fontWeight:'bold', color: isDark ? '#94a3b8' : '#cc2200', marginTop:8 },
+      inputBg: isDark ? 'rgba(15, 23, 42, 0.8)' : 'rgba(255,255,255,0.5)',
+      btn: (color, isHovered) => ({
+          width:'100%', padding:'12px 0', fontSize:15, fontWeight:'bold', fontFamily:'inherit', cursor:'pointer', borderRadius:10, transition:'all 0.2s',
+          border: `2px solid ${color}`,
+          background: isHovered ? color : 'transparent',
+          color: isHovered ? (isDark?'#000':'#fff') : color,
+          boxShadow: isHovered ? `0 0 20px ${color}66` : 'none'
+      }),
+      toggleBtn: (active) => ({
+          flex:1, padding:'10px 0', fontSize:12, fontFamily:'inherit', cursor:'pointer', transition:'all 0.2s', border:'none',
+          fontWeight: active ? 'bold' : 'normal',
+          background: active ? (isDark ? '#00ffaa' : '#333') : (isDark ? 'rgba(0,0,0,0.4)' : '#fff'),
+          color: active ? (isDark ? '#000' : '#fff') : (isDark ? '#94a3b8' : '#555')
+      }),
+      label: { fontSize:11, color: isDark ? '#94a3b8' : '#777', textTransform:'uppercase', letterSpacing:1, fontWeight:'bold', marginBottom:6, display:'block' },
+      separator: { borderTop: isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)', margin: '20px 0' }
+  };
+
+  if (showHelp) return (
+      <div style={st.wrapper}>
+        <div style={{...st.card, textAlign:'center', maxWidth: 650}}>
+          <h2 style={{marginBottom: 20}}>{t.helpTitle}</h2>
+          <div style={{display:'flex', gap:20, textAlign:'left'}}>
+              <div style={{flex:1}}>
+                 <h3 style={{color: '#00ffaa', fontSize:14, borderBottom: st.separator.borderTop, paddingBottom:8}}>PC / MAC</h3>
+                 <div style={{marginTop: 10, display:'flex', flexDirection:'column', gap:8}}>
+                     {t.controlsMapMouse.map(([k,v]) => <div key={k} style={{fontSize:12}}><strong>{k}</strong>: <span style={{color: st.label.color}}>{v}</span></div>)}
+                     <div style={{borderTop: st.separator.borderTop, paddingTop: 8, marginTop: 4}}/>
+                     {t.controlsMapKbd.map(([k,v]) => <div key={k} style={{fontSize:12}}><strong>{k}</strong>: <span style={{color: st.label.color}}>{v}</span></div>)}
+                 </div>
+              </div>
+              <div style={{flex:1}}>
+                 <h3 style={{color: '#c084fc', fontSize:14, borderBottom: st.separator.borderTop, paddingBottom:8}}>GAMEPAD (Xbox / PS)</h3>
+                 <div style={{marginTop: 10, display:'flex', flexDirection:'column', gap:8}}>
+                     {t.controlsMapGamepad.map(([k,v]) => <div key={k} style={{fontSize:12}}><strong>{k}</strong>: <span style={{color: st.label.color}}>{v}</span></div>)}
+                 </div>
+              </div>
+          </div>
+          <button onClick={() => setShowHelp(false)} style={{...st.btn(isDark?'#00ffaa':'#333', true), marginTop: 24, width: '200px'}}>{t.backBtn}</button>
+        </div>
+      </div>
+  );
+
+  if (showLeaderboard) return (
+      <div style={st.wrapper}>
+        <div style={{...st.card, textAlign:'center'}}>
+          <h2>{t.leaderboard}</h2>
+          <div style={{maxHeight: '300px', overflowY: 'auto', margin: '20px 0', padding: '10px', background: st.inputBg, borderRadius: 8}}>
+            {leaderboardData.length === 0 ? <p>{t.loading}</p> : leaderboardData.map((player, idx) => (
+                <div key={idx} style={{display:'flex', justifyContent:'space-between', padding:'8px', borderBottom: st.separator.borderTop}}>
+                  <span><strong>#{idx+1}</strong> {player.name || `Player_${player.id?.substring(0,4)}`}</span>
+                  <span style={{color: '#00ffaa', fontWeight:'bold'}}>{player.points} PKT</span>
+                </div>
+            ))}
+          </div>
+          <button onClick={() => setShowLeaderboard(false)} style={st.btn(isDark?'#00ffaa':'#333', true)}>{t.backBtn}</button>
+        </div>
+      </div>
+  );
+
+  if (isWaiting) {
+      const allReady = lobbyStatus.players?.every(p => p.ready);
+      const isFull = lobbyStatus.joined === lobbyStatus.max;
+      
+      return (
+        <div style={st.wrapper}>
+          <div style={{...st.card, maxWidth: 800}}>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: 20}}>
+                <h2>{t.lobbyTitle}</h2>
+                <div>
+                   <span style={{color: st.label.color, fontSize: 12}}>{t.joinCode}: </span>
+                   <strong style={{fontSize: 24, color: isDark ? '#00ffaa' : '#cc2200', letterSpacing: 4}}>{roomId}</strong>
+                </div>
+            </div>
+            
+            <div style={{display:'flex', gap: 20, height: 300}}>
+                <div style={{flex: 1, display:'flex', flexDirection:'column', gap: 10, background: st.inputBg, padding: 15, borderRadius: 8, border: st.card.border}}>
+                    <h3 style={{fontSize: 14, margin: 0, color: st.label.color}}>PLAYERS ({lobbyStatus.joined}/{lobbyStatus.max})</h3>
+                    <div style={{flex: 1, overflowY: 'auto'}}>
+                        {lobbyStatus.players?.map(p => (
+                            <div key={p.id} style={{display:'flex', justifyContent:'space-between', padding: '8px 0', borderBottom: st.separator.borderTop}}>
+                                <span style={{fontWeight: p.id === socket.id ? 'bold' : 'normal'}}>
+                                    {p.name} {p.id === lobbyStatus.host && <span style={{color:'#ffaa00', fontSize:10}}>(Host)</span>}
+                                </span>
+                                <span style={{color: p.ready ? '#00ffaa' : '#ff4444', fontSize: 12, fontWeight: 'bold'}}>
+                                    {p.ready ? t.ready : t.notReady}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                    {isHostRef.current ? (
+                        <button 
+                            onClick={() => socket.emit('startMatch', {roomId})} 
+                            disabled={!allReady || !isFull}
+                            style={{...st.btn('#00ffaa', allReady && isFull), opacity: (allReady && isFull) ? 1 : 0.4, cursor: (allReady && isFull) ? 'pointer' : 'not-allowed'}}
+                        >
+                            {allReady && isFull ? t.startMatch : t.lobbyWait}
+                        </button>
+                    ) : (
+                        <button 
+                            onClick={() => socket.emit('toggleReady', {roomId})} 
+                            style={st.btn(lobbyStatus.players?.find(p=>p.id===socket.id)?.ready ? '#ff4444' : '#00ffaa', true)}
+                        >
+                            {lobbyStatus.players?.find(p=>p.id===socket.id)?.ready ? t.cancel : t.ready}
+                        </button>
+                    )}
+                </div>
+
+                <div style={{flex: 1, display:'flex', flexDirection:'column', background: st.inputBg, padding: 15, borderRadius: 8, border: st.card.border}}>
+                    <h3 style={{fontSize: 14, margin: '0 0 10px 0', color: st.label.color}}>CHAT</h3>
+                    <div style={{flex: 1, overflowY: 'auto', display:'flex', flexDirection:'column', gap: 4, fontSize: 13}}>
+                        {lobbyChat.map((msg, i) => (
+                            <div key={i}><span style={{color: '#888'}}><b>{msg.sender}:</b></span> {msg.text}</div>
+                        ))}
+                    </div>
+                    <form onSubmit={sendLobbyChat} style={{marginTop: 10}}>
+                        <input 
+                            value={lobbyChatInp} onChange={e => setLobbyChatInp(e.target.value)}
+                            placeholder={t.chatPlaceholder}
+                            style={{width:'100%', padding: '8px 12px', borderRadius: 6, border: st.card.border, background: 'rgba(0,0,0,0.3)', color: '#fff', outline: 'none'}}
+                        />
+                    </form>
+                </div>
+            </div>
+
+            <button onClick={()=>{setIsWaiting(false); socket.disconnect(); socket=null;}} style={{marginTop: 20, background: 'transparent', color: st.label.color, border: 'none', cursor:'pointer', fontWeight:'bold'}}>{t.leave}</button>
+          </div>
+        </div>
+      );
+  }
+
+  return(
+    <div style={st.wrapper} onClick={() => {
+        if (musicPlaying && audioRef.current && audioRef.current.paused) {
+            audioRef.current.play().catch(()=>{});
+        }
+        onInteract();
+    }}>
+      {/* TŁO MENU POPRAWIONE */}
+      <div style={{position:'absolute', top:0, left:0, right:0, bottom:0, backgroundImage: `url(${pitchImg})`, backgroundSize: 'cover', backgroundPosition: 'center', opacity: isDark ? 0.15 : 0.3, mixBlendMode: isDark ? 'overlay' : 'normal', pointerEvents:'none'}} />
+
+      <div style={{position:'absolute', top: 20, right: 20, display:'flex', gap: 8, zIndex: 10}}>
+        <button onClick={() => setLang(lang === 'en' ? 'pl' : 'en')} style={{padding:'6px 12px', cursor:'pointer', background:st.inputBg, color:st.wrapper.color, border:st.card.border, borderRadius:8, fontWeight:'bold', backdropFilter:'blur(4px)'}}>
+            {lang === 'en' ? '🇵🇱 PL' : '🇬🇧 EN'}
+        </button>
+        <button onClick={()=>{
+            setMusicPlaying(!musicPlaying); 
+            onInteract();
+        }} style={{padding:'6px 12px', cursor:'pointer', background:musicPlaying?'#ff4488':st.inputBg, color:'#fff', border:st.card.border, borderRadius:8, fontWeight:'bold'}}>
+            {musicPlaying ? '🔊 Music ON' : '🔈 Music OFF'}
+        </button>
+        <button onClick={()=>setShowHelp(true)} style={{padding:'6px 12px', cursor:'pointer', background:'#3b82f6', color:'#fff', border:st.card.border, borderRadius:8, fontWeight:'bold'}}>❓</button>
+        <button onClick={()=>setShowLeaderboard(true)} style={{padding:'6px 12px', cursor:'pointer', background:'#c084fc', color:'#fff', border:st.card.border, borderRadius:8, fontWeight:'bold'}}>🏆 Ranking</button>
+        <button onClick={()=>setTheme(isDark?'light':'dark')} style={{padding:'6px 12px', cursor:'pointer', background:st.inputBg, color:st.wrapper.color, border:st.card.border, borderRadius:8, backdropFilter:'blur(4px)'}}>{isDark ? '☀️' : '🌙'}</button>
+      </div>
+
+      <div style={{position:'absolute', top: 20, left: 20, zIndex: 10, background: st.inputBg, padding: '8px 16px', borderRadius: 8, border: st.card.border, backdropFilter:'blur(4px)'}}>
+         <span style={{fontSize: 12, color: st.label.color, fontWeight:'bold', textTransform:'uppercase'}}>{t.elo}</span>
+         <span style={{marginLeft: 8, color: isDark ? '#00ffaa' : '#cc2200', fontWeight: '900', fontSize: 16}}>{playerElo}</span>
+      </div>
+
+      <div style={st.card}>
+        <div style={{textAlign:'center',marginBottom:24}}>
+          <div style={st.title}>Beki.io</div>
+          <div style={st.subtitle}>Pro League Edition</div>
+        </div>
+        
+        <div style={{gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16}}>
+            <span style={st.label}>{t.playerName}</span>
+            <input 
+              value={playerName} 
+              onChange={(e) => { setPlayerName(e.target.value); localStorage.setItem('beki_name', e.target.value); }} 
+              placeholder={lang==='pl'?"Wpisz swoją nazwę...":"Enter your name..."} 
+              maxLength={12}
+              style={{width:'100%', height: 38, padding:'0 14px', fontSize:16, fontWeight:'bold', border:st.card.border, borderRadius:8, background:st.inputBg, color:st.wrapper.color, outline:'none'}} 
+            />
+        </div>
+
+        <div style={{display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr', gap:12, marginBottom: 16}}>
+          <div>
+            <span style={st.label}>{t.color}</span>
+            <input type="color" value={playerColor} onChange={(e) => setPlayerColor(e.target.value)} style={{cursor: 'pointer', border: st.card.border, width: '100%', height: 38, padding: 0, background: 'none', borderRadius:8}} />
+          </div>
+          <div>
+            <span style={st.label}>{t.limit}</span>
+            <select value={scoreLimit} onChange={(e)=>setScoreLimit(Number(e.target.value))} style={{width:'100%', height:38, padding:'0 10px', fontSize:14, border:st.card.border, borderRadius:8, background:st.inputBg, color:st.wrapper.color, outline:'none'}}>
+              <option value={3}>3 {t.goals}</option><option value={5}>5 {t.goals}</option><option value={10}>10 {t.goals}</option>
+            </select>
+          </div>
+          <div>
+            <span style={st.label}>{t.timeLimit}</span>
+            <select value={timeLimit} onChange={(e)=>setTimeLimit(Number(e.target.value))} style={{width:'100%', height:38, padding:'0 10px', fontSize:14, border:st.card.border, borderRadius:8, background:st.inputBg, color:st.wrapper.color, outline:'none'}}>
+              <option value={0}>{lang==='pl'?'Brak':'None'}</option>
+              <option value={60}>1 Min</option>
+              <option value={180}>3 Min</option>
+              <option value={300}>5 Min</option>
+              <option value={600}>10 Min</option>
+              <option value={900}>15 Min</option>
+            </select>
+          </div>
+          <div>
+            <span style={st.label}>{t.players}</span>
+            <select value={is2v2 ? '2v2' : '1v1'} onChange={(e)=>setIs2v2(e.target.value === '2v2')} style={{width:'100%', height:38, padding:'0 10px', fontSize:14, border:st.card.border, borderRadius:8, fontWeight:'bold', background:st.inputBg, color:st.wrapper.color, outline:'none'}}>
+              <option value="1v1">1 vs 1</option><option value="2v2">2 vs 2</option>
+            </select>
+          </div>
+        </div>
+
+        <div style={{marginBottom: 16}}>
+          <div style={st.label}>{t.botDiff}</div>
+          <div style={{display:'flex', borderRadius:8, overflow:'hidden', border:st.card.border}}>
+            {['nowicjusz','sredni','zaawansowany','hardcore'].map((d,i)=>(
+              <button key={d} onClick={()=>setDiff(d)} style={{...st.toggleBtn(diff===d), borderRight:i<3?st.card.border:'none'}}>{t[d]}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{marginBottom: 16}}>
+          <div style={st.label}>{t.controls}</div>
+          <div style={{display:'flex', borderRadius:8, overflow:'hidden', border:st.card.border}}>
+            {[['mouse', t.mouseKbd],['keyboard', t.kbdOnly]].map(([c,label],i)=>(
+              <button key={c} onClick={()=>setControls(c)} style={{...st.toggleBtn(controls===c), borderRight:i<1?st.card.border:'none'}}>{label}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={st.separator}/>
+
+        {!showJoin ? (
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+            {[ {id:'bot',label:t.playBot,color:isDark?'#00ffaa':'#1e6b36',onClick:()=>onStart({mode:'bot',difficulty:diff,controls,playerColor,playerName,scoreLimit,timeLimit,is2v2,role:'p1'})}, 
+               {id:'multi',label:t.playLocal,color:isDark?'#3b82f6':'#1753c2',onClick:()=>onStart({mode:'multi',difficulty:diff,controls,playerColor,playerName,scoreLimit,timeLimit,is2v2,role:'p1'})}, 
+               {id:'online_create',label:t.playOnlineCreate,color:isDark?'#c084fc':'#851985',onClick:handleCreateOnline}, 
+               {id:'online_join',label:t.playOnlineJoin,color:isDark?'#c084fc':'#851985',onClick:()=>setShowJoin(true)}
+            ].map(({id,label,color,onClick})=>(
+              <button key={id} onMouseEnter={()=>setHov(id)} onMouseLeave={()=>setHov(null)} onClick={onClick} style={st.btn(color, hov===id)}>{label}</button>
+            ))}
+          </div>
+        ) : (
+          <div style={{display:'flex',flexDirection:'column',gap:12}}>
+            <input placeholder={t.joinCode} value={joinCode} onChange={(e)=>setJoinCode(e.target.value)} style={{padding:14, fontSize:22, textAlign:'center', textTransform:'uppercase', borderRadius:8, border:st.card.border, background:st.inputBg, color:st.wrapper.color, outline:'none', letterSpacing:4}} maxLength={4} />
+            <button onClick={handleJoinOnline} style={st.btn(isDark?'#c084fc':'#851985', true)}>{t.joinBtn}</button>
+            <button onClick={()=>setShowJoin(false)} style={{padding:'12px', background:'transparent', color:st.label.color, border:st.card.border, borderRadius:8, cursor:'pointer'}}>{t.backBtn}</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Game({mode, difficulty, roomId, role, controls, playerColor, playerName, scoreLimit, timeLimit, is2v2, onBack, lang}){
+
+  const effectiveRole = role || (mode === 'online-client' ? 'p2' : 'p1');
+  const serverStateRef = useRef(null);
+  const remoteInputs = useRef({});
+  const ignoreServerBallUntil = useRef(0);
+  
+  const disconnectedRoles = useRef(new Set());
+
+  const inputState = useRef({
+      lmbDown: false,
+      mouse: new THREE.Vector2(),
+      keys: {}
+  }).current;
+
+  const raycaster = new THREE.Raycaster();
+  const groundPlane = new THREE.Plane(new THREE.Vector3(0,1,0),0);
+
+  const t = i18n[lang];
+  const mountRef=useRef(null);
+  const scoreRef=useRef(null);
+  const timeRef=useRef(null);
+  const msgRef=useRef(null);
+  const dashBarRef=useRef(null);
+  const dashLblRef=useRef(null);
+  
+  const chargeContainerRef = useRef(null);
+  const chargeRef = useRef(null);
+  const chargeTextRef = useRef(null);
+  
+  const [gameOver, setGameOver] = useState(null); 
+  const [isMobile, setIsMobile] = useState(false);
+  
+  const leftJoyRef = useRef(null);
+  const rightJoyRef = useRef(null);
+
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const isTyping = useRef(false);
+
+  const touchInputs = useRef({ mx: 0, mz: 0, aimX: 0, aimZ: 0, chargeStraight: false, chargeCurve: false, jump: false, dash: false, flick: false, pass: false, spinCharge: 0 });
+  const rightStickBase = useRef({ x: 0, y: 0 });
+  const dragStartX = useRef(0); 
+
+  const kickAudioPool = useRef([]);
+  const kickAudioIdx = useRef(0);
+
+  const oneShot = useRef({ flick: false, pass: false, dash: false, jump: false });
+  const actionCounters = useRef({ pass: 0, flick: 0 });
+  const gpPrev = useRef({ pass: false, flick: false });
+
+  useEffect(() => {
+    kickAudioPool.current = Array.from({length: 8}, () => {
+        const a = new Audio('/ballkick.mp3');
+        a.preload = 'auto';
+        return a;
+    });
+  }, []);
+
+  const playKickSound = (power) => {
+    if (!kickAudioPool.current.length) return;
+    const a = kickAudioPool.current[kickAudioIdx.current];
+    kickAudioIdx.current = (kickAudioIdx.current + 1) % kickAudioPool.current.length;
+    a.volume = clamp(power * 0.3, 0.2, 1.0);
+    a.playbackRate = clamp(1.2 - power * 0.1, 0.8, 1.2);
+    a.currentTime = 0;
+    const p = a.play();
+    if (p !== undefined) p.catch(()=>{});
+  };
+
+  const handleLeftTouchMove = (e) => {
+      const touch = e.targetTouches[0]; 
+      if (!touch) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const cx = rect.left + rect.width/2; const cy = rect.top + rect.height/2;
+      let dx = touch.clientX - cx; let dy = touch.clientY - cy;
+      const dist = Math.sqrt(dx*dx+dy*dy); 
+      const maxR = rect.width/2;
+      const clampedDist = Math.min(dist, maxR);
+      const nx = dist > 0 ? dx/dist : 0;
+      const ny = dist > 0 ? dy/dist : 0;
+      
+      touchInputs.current.mx = nx * (clampedDist/maxR); 
+      touchInputs.current.mz = ny * (clampedDist/maxR);
+      
+      if(leftJoyRef.current) {
+          leftJoyRef.current.style.transform = `translate(-50%, -50%) translate(${nx * clampedDist}px, ${ny * clampedDist}px)`;
+      }
+  };
+  const handleLeftTouchEnd = () => { 
+      touchInputs.current.mx = 0; touchInputs.current.mz = 0; 
+      if(leftJoyRef.current) leftJoyRef.current.style.transform = `translate(-50%, -50%)`;
+  };
+
+  const handleRightTouchStart = (e) => {
+      const touch = e.targetTouches[0]; 
+      if (!touch) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      rightStickBase.current = { x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
+      touchInputs.current.chargeCurve = true; 
+      touchInputs.current.chargeStraight = true;
+  };
+  const handleRightTouchMove = (e) => {
+      const touch = e.targetTouches[0];
+      if (!touch) return;
+      let dx = touch.clientX - rightStickBase.current.x; 
+      let dy = touch.clientY - rightStickBase.current.y;
+      const dist = Math.sqrt(dx*dx+dy*dy);
+      const maxR = 60; 
+      const clampedDist = Math.min(dist, maxR);
+      let nx = dist > 0 ? dx/dist : 0;
+      let ny = dist > 0 ? dy/dist : 0;
+      
+      if (Math.abs(dx) < 20) {
+          nx = 0;
+          ny = dy > 0 ? 1 : -1;
+      }
+
+      if(dist>10) { touchInputs.current.aimX = nx; touchInputs.current.aimZ = ny; }
+      
+      const actualRole = effectiveRole;
+      const isTeamA = (actualRole === 'p1' || actualRole === 'p3');
+      const flipSign = isTeamA ? -1 : 1; 
+      
+      const deadzoneX = 20;
+      let spinValue = 0;
+      if (Math.abs(dx) > deadzoneX) {
+          spinValue = Math.sign(dx) * (Math.abs(dx) - deadzoneX);
+      }
+
+      touchInputs.current.spinCharge = spinValue * 0.035 * flipSign; 
+      
+      if(rightJoyRef.current) {
+          rightJoyRef.current.style.transform = `translate(-50%, -50%) translate(${nx * clampedDist}px, ${ny * clampedDist}px)`;
+      }
+  };
+  const handleRightTouchEnd = () => { 
+      touchInputs.current.chargeCurve = false; 
+      touchInputs.current.chargeStraight = false;
+      touchInputs.current.spinCharge = 0; 
+      if(rightJoyRef.current) rightJoyRef.current.style.transform = `translate(-50%, -50%)`;
+  };
+
+  const keyDown = e => { 
+    if (isTyping.current) return; 
+    inputState.keys[e.code] = true;
+    if (e.code === 'KeyE') oneShot.current.flick = true;
+    if (e.code === 'KeyC') oneShot.current.pass = true;
+    if (e.code === 'Space') oneShot.current.jump = true;
+    if (e.code === 'ShiftLeft') oneShot.current.dash = true;
+    if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  };
+  const keyUp = e => { 
+      if (isTyping.current) return; 
+      inputState.keys[e.code] = false; 
+  };
+  
+  const onMouseMove = (e) => {
+    if(controls!=='mouse' || isMobile) return;
+    inputState.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+    inputState.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  };
+
+  const onMouseDown = (e) => {
+    if(controls!=='mouse' || isMobile || isTyping.current) return;
+    if (e.button === 0) {
+        inputState.lmbDown = true;
+        dragStartX.current = inputState.mouse.x; 
+    }
+  };
+
+  const onMouseUp = (e) => {
+    if(controls!=='mouse' || isMobile) return;
+    if (e.button === 0) {
+        inputState.lmbDown = false;
+    }
+  };
+  const onContextMenu = (e) => { if(controls==='mouse') e.preventDefault(); };
+
+  useEffect(()=>{
+    window.addEventListener('keydown',keyDown); window.addEventListener('keyup',keyUp);
+    window.addEventListener('mousemove', onMouseMove); window.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mouseup', onMouseUp); window.addEventListener('contextmenu', onContextMenu);
+    return () => {
+      window.removeEventListener('keydown',keyDown); window.removeEventListener('keyup',keyUp);
+      window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mouseup', onMouseUp); window.removeEventListener('contextmenu', onContextMenu);
+    }
+  }, [controls, isMobile]);
+
+  useEffect(()=>{
+    const isMobileDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    setIsMobile(isMobileDevice);
+
+    const actualRole = effectiveRole;
+    const isTeamA = (actualRole === 'p1' || actualRole === 'p3');
+    
+    const camZ = isTeamA ? -23 : 23; 
+    const flipSign = isTeamA ? -1 : 1; 
+
+    const prevChargingStraight = {};
+
+    let shakeTime = 0, shakeIntensity = 0;
+    const triggerShake = (duration, intensity) => {
+        shakeTime = duration; shakeIntensity = intensity;
+    };
+
+    const mount=mountRef.current; if(!mount) return;
+    const renderer=new THREE.WebGLRenderer({antialias:true});
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+    renderer.shadowMap.enabled=true;
+    renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+    
+    mount.appendChild(renderer.domElement);
+    const scene=new THREE.Scene();
+    scene.background=new THREE.Color(0x06090f);
+    const W=mount.clientWidth,H=mount.clientHeight;
+    
+    const camera=new THREE.PerspectiveCamera(58,W/H,0.1,300);
+    const baseCamPos = new THREE.Vector3(0, 23, camZ);
+    camera.position.copy(baseCamPos); 
+    camera.lookAt(0,0,0);
+    renderer.setSize(W,H);
+
+    scene.add(new THREE.AmbientLight(0x2a3d54, 1.8));
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    scene.add(hemiLight);
+
+    const sun1 = new THREE.DirectionalLight(0xffffff, 0.9);
+    sun1.position.set(10, 30, 20); 
+    sun1.castShadow = true;
+    sun1.shadow.mapSize.set(2048,2048);
+    sun1.shadow.camera.left=-18; sun1.shadow.camera.right=18;
+    sun1.shadow.camera.top=14; sun1.shadow.camera.bottom=-14; sun1.shadow.camera.far=60;
+    scene.add(sun1);
+
+    const sun2 = new THREE.DirectionalLight(0xffffff, 0.6);
+    sun2.position.set(-10, 30, -20);
+    scene.add(sun2); 
+
+    const bL=new THREE.PointLight(0x2255ff,3,24); bL.position.set(0,4,-8); scene.add(bL);
+    const rL=new THREE.PointLight(0xff2211,3,24); rL.position.set(0,4,8); scene.add(rL);
+    const tL=new THREE.PointLight(0xffffff,0.8,30); tL.position.set(0,12,0); scene.add(tL);
+
+    const fl=new THREE.Mesh(new THREE.PlaneGeometry(FW,FD),new THREE.MeshLambertMaterial({color:0x1a6035}));
+    fl.rotation.x=-Math.PI/2; fl.receiveShadow=true; scene.add(fl);
+    for(let i=0;i<4;i++){
+      const s=new THREE.Mesh(new THREE.PlaneGeometry(FW,FD/8),new THREE.MeshLambertMaterial({color:0x175c30}));
+      s.rotation.x=-Math.PI/2; s.position.set(0,0.001,-hd+FD/16+i*(FD/4)); scene.add(s);
+    }
+    const lm=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.5});
+    const lmB=new THREE.LineBasicMaterial({color:0x44aaff,transparent:true,opacity:1.0});
+    const addLine=(mat,...pts)=>scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts.map(([x,z])=>new THREE.Vector3(x,0.04,z))),mat));
+    addLine(lm,[-hw,-hd],[hw,-hd],[hw,hd],[-hw,hd],[-hw,-hd]); addLine(lmB,[-hw,0],[hw,0]);
+    for(let i=0;i<=64;i++){const a0=(i-1)/64*Math.PI*2,a1=i/64*Math.PI*2;addLine(lm,[Math.cos(a0)*3.5,Math.sin(a0)*3.5],[Math.cos(a1)*3.5,Math.sin(a1)*3.5]);}
+    addLine(lm,[-3.2,-hd],[-3.2,-hd+2.5],[3.2,-hd+2.5],[3.2,-hd]); addLine(lm,[-3.2,hd],[-3.2,hd-2.5],[3.2,hd-2.5],[3.2,hd]);
+    const midPlane=new THREE.Mesh(new THREE.PlaneGeometry(FW,0.12),new THREE.MeshBasicMaterial({color:0x1144cc,transparent:true,opacity:0.4}));
+    midPlane.rotation.x=-Math.PI/2; midPlane.position.y=0.05; scene.add(midPlane);
+
+    const kickoffBarrierMat = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide});
+    const kickoffBarrier = new THREE.Mesh(new THREE.PlaneGeometry(FW, FH), kickoffBarrierMat);
+    scene.add(kickoffBarrier);
+
+    const bumpMat=new THREE.MeshPhongMaterial({color:0xffaa00,shininess:160,emissive:0x442200});
+    BUMPERS.forEach(([bx,bz])=>{
+      const bm=new THREE.Mesh(new THREE.SphereGeometry(BUMP_R,24,18),bumpMat.clone()); bm.scale.set(1,0.55,1); bm.position.set(bx,0,bz); bm.castShadow=true; scene.add(bm);
+      const glow=new THREE.Mesh(new THREE.SphereGeometry(BUMP_R*1.4,20,14),new THREE.MeshBasicMaterial({color:0xff8800,transparent:true,opacity:0.18,side:THREE.DoubleSide})); glow.scale.set(1,0.55,1); glow.position.set(bx,0,bz); scene.add(glow);
+      const ring=new THREE.Mesh(new THREE.RingGeometry(BUMP_R,BUMP_R+0.25,32),new THREE.MeshBasicMaterial({color:0xffcc44,side:THREE.DoubleSide,transparent:true,opacity:0.6})); ring.rotation.x=-Math.PI/2; ring.position.set(bx,0.06,bz); scene.add(ring);
+      const pillar=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,FH*0.5,8),new THREE.MeshPhongMaterial({color:0xffaa00,emissive:0x331100})); pillar.position.set(bx,FH*0.25,bz); scene.add(pillar);
+    });
+
+    const wm=new THREE.MeshPhongMaterial({color:0x4477aa,transparent:true,opacity:0.08,side:THREE.DoubleSide});
+    const addWall=(w,h,d,x,y,z)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),wm.clone());m.position.set(x,y,z);scene.add(m);};
+    addWall(0.1,FH,FD,-hw,FH/2,0); addWall(0.1,FH,FD,hw,FH/2,0);
+    const ew=(FW-GW)/2;
+    [-hd,hd].forEach(z=>{addWall(ew,FH,0.1,-hw+ew/2,FH/2,z);addWall(ew,FH,0.1,hw-ew/2,FH/2,z);addWall(GW,FH-GH,0.1,0,GH+(FH-GH)/2,z);});
+
+    const mkGoal=(z,color)=>{
+      const dir=z<0?-1:1;
+      const nm=new THREE.MeshBasicMaterial({color,transparent:true,opacity:0.16,side:THREE.DoubleSide});
+      const pm=new THREE.MeshLambertMaterial({color:0xe8e8e8});
+      const addNet=(geo,x,y,oz)=>{const m=new THREE.Mesh(geo,nm.clone());m.position.set(x,y,z+dir*oz);scene.add(m);};
+      addNet(new THREE.PlaneGeometry(GW,GH),0,GH/2,GD);
+      const sL=new THREE.Mesh(new THREE.PlaneGeometry(GD,GH),nm.clone()); sL.rotation.y=Math.PI/2; sL.position.set(-GW/2,GH/2,z+dir*GD/2); scene.add(sL);
+      const sR=sL.clone(); sR.position.x=GW/2; scene.add(sR);
+      const top=new THREE.Mesh(new THREE.PlaneGeometry(GW,GD),nm.clone()); top.rotation.x=Math.PI/2; top.position.set(0,GH,z+dir*GD/2); scene.add(top);
+      for(const px of[-GW/2,GW/2]){const p=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,GH,8),pm.clone());p.position.set(px,GH/2,z);p.castShadow=true;scene.add(p);}
+      const bar=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,GW+0.14,8),pm.clone()); bar.rotation.z=Math.PI/2; bar.position.set(0,GH,z); scene.add(bar);
+    };
+    mkGoal(-hd,0x2255ff);
+    mkGoal(hd,0xff2211);
+
+    // ===============================================
+    // OBSŁUGA ŁADOWANIA TEKSTURY Z BEZPOŚREDNIEGO IMPORTU
+    // ===============================================
+    const textureLoader = new THREE.TextureLoader();
+    const ballTex = textureLoader.load(ballImg); // Używamy zaimportowanej zmiennej
+    ballTex.colorSpace = THREE.SRGBColorSpace; 
+    
+    const ballM = new THREE.Mesh(
+      new THREE.SphereGeometry(BR, 32, 32),
+      new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        map: ballTex,
+        roughness: 0.6,
+        metalness: 0.1
+      })
+    ); 
+    ballM.castShadow=true; scene.add(ballM);
+    // ===============================================
+
+    const ballGlowMat = new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0});
+    const ballGlow = new THREE.Mesh(new THREE.SphereGeometry(BR*1.2, 16, 16), ballGlowMat); scene.add(ballGlow);
+    const ballSh=new THREE.Mesh(new THREE.CircleGeometry(BR*1.4,20),new THREE.MeshBasicMaterial({color:0x000000,transparent:true,opacity:0.4,depthWrite:false})); ballSh.rotation.x=-Math.PI/2; scene.add(ballSh);
+
+    const trajPtsArr=[]; for(let i=0;i<35;i++) trajPtsArr.push(new THREE.Vector3());
+    const trajGeo=new THREE.BufferGeometry().setFromPoints(trajPtsArr);
+    const trajLine=new THREE.Line(trajGeo,new THREE.LineBasicMaterial({color:0x00ffaa,transparent:true,opacity:0, linewidth: 3})); scene.add(trajLine);
+
+    const p1Range=new THREE.Mesh(new THREE.RingGeometry(1.4,1.6,36),new THREE.MeshBasicMaterial({color:0x00ff88,side:THREE.DoubleSide,transparent:true,opacity:0})); p1Range.rotation.x=-Math.PI/2; p1Range.position.y=0.05; scene.add(p1Range);
+    
+    const arrowGroup=new THREE.Group(); arrowGroup.position.y=0.1; scene.add(arrowGroup);
+    const arrowShaft=new THREE.Mesh(new THREE.PlaneGeometry(0.14,0.9),new THREE.MeshBasicMaterial({color:0x00ff88,transparent:true,opacity:0,side:THREE.DoubleSide})); 
+    arrowShaft.rotation.x=-Math.PI/2; arrowShaft.position.z=0.45; arrowGroup.add(arrowShaft);
+    const arrowHead=new THREE.Mesh(new THREE.ConeGeometry(0.24,0.5,8),new THREE.MeshBasicMaterial({color:0x00ff88,transparent:true,opacity:0})); 
+    arrowHead.rotation.x=Math.PI/2; arrowHead.position.z=1.1; arrowGroup.add(arrowHead);
+
+    const mkPlayer=(colorHex)=>{
+      const g=new THREE.Group(); scene.add(g);
+      const body=new THREE.Mesh(new THREE.SphereGeometry(PR,22,22),new THREE.MeshPhongMaterial({color: colorHex,shininess:90})); body.castShadow=true; g.add(body);
+      const top=new THREE.Mesh(new THREE.ConeGeometry(0.16,0.4,8),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.75})); top.position.y=PR+0.5; g.add(top);
+      const ring=new THREE.Mesh(new THREE.RingGeometry(PR*0.9,PR+0.12,24),new THREE.MeshBasicMaterial({color: colorHex,side:THREE.DoubleSide,transparent:true,opacity:0.5})); ring.rotation.x=-Math.PI/2; ring.position.y=0.03; g.add(ring);
+      return g;
+    };
+    
+    const myColorHex = parseInt((playerColor || '#00dd55').replace('#', ''), 16);
+    const oppColorHex = 0xff2222;
+    
+    const teamAColor = isTeamA ? myColorHex : oppColorHex;
+    const teamBColor = !isTeamA ? myColorHex : oppColorHex;
+
+    const p1G=mkPlayer(teamAColor); 
+    const p2G=mkPlayer(teamBColor);
+    const p3G=mkPlayer(teamAColor); 
+    const p4G=mkPlayer(teamBColor);
+
+    const trailMat=new THREE.MeshBasicMaterial({color:0x00ffcc,transparent:true,opacity:0,depthWrite:false});
+    const trailMesh=new THREE.Mesh(new THREE.SphereGeometry(PR*0.7,10,10),trailMat); scene.add(trailMesh);
+    const chargeRingMesh=new THREE.Mesh(new THREE.RingGeometry(PR+0.18,PR+0.42,32,1,0,0.001),new THREE.MeshBasicMaterial({color:0xffff00,side:THREE.DoubleSide,transparent:true,opacity:0})); chargeRingMesh.rotation.x=-Math.PI/2; chargeRingMesh.position.y=0.08; scene.add(chargeRingMesh);
+
+    const mkAgent=(id, team)=>({id, team, pos:new THREE.Vector3(),vel:new THREE.Vector3(),onGround:false,chargeT:0,chargingStraight:false,chargingCurve:false,dir:new THREE.Vector3(0,0,1),dashCD:0,dashT:0,dashDirX:0,dashDirZ:0, kickCD:0, lobCD:0, spinCharge:0, pass: false, passCount: 0, flickCount: 0});
+    const ball={pos:new THREE.Vector3(),vel:new THREE.Vector3(), spin: 0};
+    
+    const p1=mkAgent('p1', 'A'); p1.dir.set(0,0,1);
+    const p2=mkAgent('p2', 'B'); p2.dir.set(0,0,-1);
+    const p3=mkAgent('p3', 'A'); p3.dir.set(0,0,1);
+    const p4=mkAgent('p4', 'B'); p4.dir.set(0,0,-1);
+    
+    const agents = is2v2 ? [p1, p2, p3, p4] : [p1, p2];
+    const score={a:0,b:0};
+    
+    let goalTimer=0, msgText='', animId, lastT=performance.now();
+    let netTick = 0; 
+    const NETWORK_RATE = 0.033; 
+    
+    let isMatchOver = false;
+    let currentKickoff = 'neutral';
+    let pendingReset = null;
+    let timerSeconds = timeLimit;
+    
+    const cfg=BOT_CFG[difficulty] || BOT_CFG['sredni'];
+
+    if (socket) {
+      socket.on('opponentInput', ({ role: r, input }) => { 
+          remoteInputs.current[r] = input;
+      });
+      socket.on('gameState', (st) => { serverStateRef.current = st; });
+      socket.on('chatMessage', (msgObj) => { setChatMessages(prev => [...prev, msgObj].slice(-10)); });
+      socket.on('triggerEvent', ({type, power}) => {
+        if (type === 'kick') playKickSound(power);
+        if (type === 'shake') triggerShake(0.5, power);
+        if (type === 'rematch') resetMatch();
+      });
+      socket.on('playerLeft', ({ role }) => {
+          disconnectedRoles.current.add(role);
+          setChatMessages(prev => [...prev, {sender: 'System', text: `Player ${role} left the game.`}].slice(-10));
+      });
+    }
+
+    const reset=(whoScored)=>{
+      ball.pos.set(0,BR,0); ball.vel.set(0,0,0); ball.spin = 0;
+      
+      p1.pos.set(is2v2?-2.5:0, PR, -4.8); p1.vel.set(0,0,0); p1.dir.set(0,0,1); p1.onGround=true; p1.chargeT=0; p1.chargingStraight=false; p1.dashT=0; p1.spinCharge=0; p1.lobCD=0; p1.kickCD=0;
+      p2.pos.set(is2v2? 2.5:0, PR,  4.8); p2.vel.set(0,0,0); p2.dir.set(0,0,-1); p2.onGround=true; p2.chargeT=0; p2.chargingStraight=false; p2.dashT=0; p2.spinCharge=0; p2.lobCD=0; p2.kickCD=0;
+      
+      p3.pos.set(is2v2? 2.5:0, PR, -4.8); p3.vel.set(0,0,0); p3.dir.set(0,0,1); p3.onGround=true; p3.chargeT=0; p3.chargingStraight=false; p3.dashT=0; p3.spinCharge=0; p3.lobCD=0; p3.kickCD=0;
+      p4.pos.set(is2v2?-2.5:0, PR,  4.8); p4.vel.set(0,0,0); p4.dir.set(0,0,-1); p4.onGround=true; p4.chargeT=0; p4.chargingStraight=false; p4.dashT=0; p4.spinCharge=0; p4.lobCD=0; p4.kickCD=0;
+      
+      if(!is2v2){ p3.pos.y = -100; p4.pos.y = -100; }
+      
+      agents.forEach(ag => { ag.botDelay = 1.0; }); 
+      
+      if (whoScored === 'A') currentKickoff = 'B';
+      else if (whoScored === 'B') currentKickoff = 'A';
+      else currentKickoff = 'neutral';
+    };
+    reset(null);
+
+    const resetMatch = () => {
+      score.a = 0; score.b = 0;
+      timerSeconds = timeLimit;
+      isMatchOver = false;
+      setGameOver(null);
+      reset(null);
+      if(scoreRef.current)scoreRef.current.textContent=`0 : 0`;
+    };
+
+    window.handleRematch = () => {
+      if (socket && mode === 'online-host') socket.emit('gameEvent', { roomId, type: 'rematch', power: 0 });
+      resetMatch();
+    };
+
+    const softContact=(ball,agent,dt)=>{
+      if (agent.lobCD > 0) return; 
+      if (currentKickoff !== 'neutral' && currentKickoff !== agent.team) return;
+
+      const dx=ball.pos.x-agent.pos.x, dz=ball.pos.z-agent.pos.z;
+      let dy=ball.pos.y-agent.pos.y;
+      if (dy > PR * 0.8) dy = PR * 0.8; 
+      
+      const dist = Math.sqrt(dx*dx+dy*dy+dz*dz);
+      const adjDist = dist || 1;
+      const minDist = BR+PR;
+      
+      if(dist<minDist&&dist>0.001){
+        const nx=dx/adjDist, ny=dy/adjDist, nz=dz/adjDist, pen=minDist-dist;
+        const relVn=(ball.vel.x-agent.vel.x)*nx+(ball.vel.y-agent.vel.y)*ny+(ball.vel.z-agent.vel.z)*nz;
+        const force=CONTACT_STIFFNESS*pen-CONTACT_DAMPING*Math.min(relVn,0);
+        
+        const bs=PLAYER_MASS/(BALL_MASS+PLAYER_MASS), as=BALL_MASS/(BALL_MASS+PLAYER_MASS);
+        ball.vel.x+=nx*force*bs*dt; ball.vel.y+=ny*force*bs*dt; ball.vel.z+=nz*force*bs*dt;
+        agent.vel.x-=nx*force*as*dt*0.3; agent.vel.z-=nz*force*as*dt*0.3;
+        const c=pen*0.35;
+        ball.pos.x+=(dx/dist)*c*bs; ball.pos.y+=(dy/dist)*c*bs; ball.pos.z+=(dz/dist)*c*bs;
+        
+        if (currentKickoff === agent.team) currentKickoff = 'neutral';
+        if (agent.id === effectiveRole) ignoreServerBallUntil.current = performance.now() + 150;
+      }
+      
+      const flatDx = ball.pos.x - agent.pos.x;
+      const flatDz = ball.pos.z - agent.pos.z;
+      const flatDist = Math.sqrt(flatDx*flatDx + flatDz*flatDz);
+      const speed = Math.sqrt(agent.vel.x**2 + agent.vel.z**2);
+      const bSpeed = Math.sqrt(ball.vel.x**2 + ball.vel.z**2);
+      const canDribble = (!agent.chargingStraight);
+
+      if (canDribble && flatDist < minDist + 0.4 && speed > 0.5 && agent.onGround && ball.pos.y < BR + 0.5 && bSpeed < speed + 4.0) {
+        const dirX = flatDx / flatDist;
+        const dirZ = flatDz / flatDist;
+        const idealX = agent.pos.x + dirX * (minDist + 0.01);
+        const idealZ = agent.pos.z + dirZ * (minDist + 0.01);
+        
+        ball.pos.x += (idealX - ball.pos.x) * dt * 18.0;
+        ball.pos.z += (idealZ - ball.pos.z) * dt * 18.0;
+        ball.vel.x += (agent.vel.x - ball.vel.x) * dt * 15.0;
+        ball.vel.z += (agent.vel.z - ball.vel.z) * dt * 15.0;
+        if (currentKickoff === agent.team) currentKickoff = 'neutral';
+        if (agent.id === effectiveRole) ignoreServerBallUntil.current = performance.now() + 150;
+      }
+    };
+
+    const bumperHit=(obj,r)=>{
+      BUMPERS.forEach(([bx,bz])=>{
+        const dx=obj.pos.x-bx,dz=obj.pos.z-bz,dist=Math.sqrt(dx*dx+dz*dz),minD=BUMP_R+r;
+        if(dist<minD&&dist>0.001){
+          const nx=dx/dist,nz=dz/dist,dot=obj.vel.x*nx+obj.vel.z*nz;
+          if(dot<0){obj.vel.x-=2.2*dot*nx;obj.vel.z-=2.2*dot*nz;}
+          obj.pos.x=bx+nx*(minD+0.02);obj.pos.z=bz+nz*(minD+0.02);
+        }
+      });
+    };
+
+    const playerContact=(A,B,dt)=>{
+      const dx=A.pos.x-B.pos.x,dy=A.pos.y-B.pos.y,dz=A.pos.z-B.pos.z;
+      const dist=Math.sqrt(dx*dx+dy*dy+dz*dz),minD=PR+PR;
+      if(dist>=minD||dist<0.001) return;
+      const nx=dx/dist,nz=dz/dist,pen=minD-dist,force=500*pen,h=dt*0.5;
+      A.vel.x+=nx*force*h;A.vel.z+=nz*force*h;B.vel.x-=nx*force*h;B.vel.z-=nz*force*h;
+      A.pos.x+=nx*pen*0.5;A.pos.z+=nz*pen*0.5;B.pos.x-=nx*pen*0.5;B.pos.z-=nz*pen*0.5;
+    };
+
+    const doKick=(agent,power,type,spinReq, isRemote=false)=>{
+      if (!isRemote && currentKickoff !== 'neutral' && currentKickoff !== agent.team) return false;
+
+      const toBall=ball.pos.clone().sub(agent.pos);
+      const dist2D=Math.sqrt(toBall.x*toBall.x+toBall.z*toBall.z);
+      const kickRadius = agent.onGround ? PR+BR+1.5 : PR+BR+2.8;
+      
+      if (dist2D > kickRadius + (isRemote ? 2.5 : 0)) return false;
+
+      if (!isRemote && agent.id === effectiveRole) {
+          if (type === 'pass') agent.passCount = (agent.passCount || 0) + 1;
+          if (type === 'flick') agent.flickCount = (agent.flickCount || 0) + 1;
+      }
+      
+      let fX, fZ;
+
+      if (type === 'flick') {
+        const dirBall = (toBall.lengthSq() > 0.0001) ? toBall.clone().normalize() : agent.dir.clone();
+        let dx = dirBall.x * 0.15 + agent.dir.x * 0.85;
+        let dz = dirBall.z * 0.15 + agent.dir.z * 0.85;
+        const len=Math.sqrt(dx*dx+dz*dz)||1;
+        fX = dx / len; fZ = dz / len;
+
+        ball.pos.x += fX * 0.3; ball.pos.z += fZ * 0.3; ball.pos.y = Math.max(ball.pos.y, PR + 0.1);
+        ball.vel.x = agent.vel.x * 0.1 + fX * 2.5; ball.vel.z = agent.vel.z * 0.1 + fZ * 2.5; 
+        ball.vel.y = 8.5; ball.spin = 0; 
+      } else if (type === 'pass') {
+        fX = agent.dir.x; fZ = agent.dir.z;
+        const len=Math.sqrt(fX*fX+fZ*fZ)||1;
+        fX /= len; fZ /= len;
+        
+        ball.vel.x = fX * 30 * power; 
+        ball.vel.z = fZ * 30 * power; 
+        ball.vel.y = 3.0; 
+        ball.spin = 0; 
+      } else {
+        fX = agent.dir.x; fZ = agent.dir.z;
+        const len=Math.sqrt(fX*fX+fZ*fZ)||1;
+        fX /= len; fZ /= len;
+
+        ball.vel.x = fX * 17 * power; ball.vel.z = fZ * 17 * power; 
+        ball.vel.y = agent.onGround ? 5 + power * 2.5 : 8 + power * 3;
+        ball.spin = spinReq * power; 
+      }
+      
+      const audioPower = (type === 'flick' || type === 'pass') ? 0.4 : power;
+      playKickSound(audioPower);
+      if (socket && !isRemote) { 
+        socket.emit('gameEvent', { roomId, type: 'kick', power: audioPower });
+        if (type !== 'flick' && type !== 'pass' && power > 1.2) socket.emit('gameEvent', { roomId, type: 'shake', power: power*0.15 });
+      }
+      
+      if (currentKickoff === agent.team) currentKickoff = 'neutral';
+      if (agent.id === effectiveRole) ignoreServerBallUntil.current = performance.now() + 400;
+      
+      return true;
+    };
+
+    const moveAgent=(agent,mx,mz,aimX,aimZ,jump,flick,chargeStraight,passPressed,dashPressed,spinReq,spd,halfSign,dt)=>{
+      const ml=Math.sqrt(mx*mx+mz*mz);
+      const aimL = Math.sqrt(aimX*aimX + aimZ*aimZ);
+      
+      if (aimL > 0.01) { agent.dir.x = aimX / aimL; agent.dir.z = aimZ / aimL; } 
+      else if(ml>0.1)  { agent.dir.x = mx/ml; agent.dir.z = mz/ml; }
+
+      agent.dashCD = Math.max(0,agent.dashCD-dt);
+      agent.kickCD = Math.max(0,agent.kickCD-dt);
+      agent.lobCD = Math.max(0,agent.lobCD-dt);
+      
+      if(agent.dashT>0){
+        agent.dashT=Math.max(0,agent.dashT-dt); agent.vel.x=agent.dashDirX*DASH_SPEED; agent.vel.z=agent.dashDirZ*DASH_SPEED;
+      } else {
+        const acc = agent.onGround ? 20 : 3; 
+        if (agent.onGround) {
+            agent.vel.x+=(mx*spd-agent.vel.x)*Math.min(acc*dt,1); agent.vel.z+=(mz*spd-agent.vel.z)*Math.min(acc*dt,1);
+        } else {
+            agent.vel.x += mx * spd * 0.8 * dt;
+            agent.vel.z += mz * spd * 0.8 * dt;
+        }
+      }
+      
+      if(dashPressed&&agent.dashCD<=0&&ml>0.1&&agent.onGround){
+        agent.dashT=DASH_DURATION; agent.dashCD=DASH_COOLDOWN; agent.dashDirX=mx/ml; agent.dashDirZ=mz/ml;
+      }
+      if(jump&&agent.onGround){agent.vel.y=12.5; agent.onGround=false;}
+      
+      if (chargeStraight) {
+        agent.chargeT = Math.min(agent.chargeT + dt*0.65, 1.5);
+        agent.chargingStraight = true;
+      } else if (agent.chargingStraight) {
+        if (agent.chargeT < 0.25) {
+            if(doKick(agent, 1.0, 'flick', 0)) { agent.lobCD = 0.3; agent.kickCD = 0.2; }
+        } else {
+            if(doKick(agent, 1.0 + agent.chargeT*1.5, 'straight', spinReq)) { agent.kickCD = 0.2; }
+        }
+        agent.chargeT = 0; agent.chargingStraight = false; agent.spinCharge = 0;
+      }
+
+      if(flick && !agent.chargingStraight && agent.kickCD <= 0) {
+         if(doKick(agent, 1.0, 'flick', 0)) { agent.lobCD = 0.3; agent.kickCD = 0.2; }
+      }
+      
+      if(passPressed && !agent.chargingStraight && agent.kickCD <= 0) {
+         if(doKick(agent, 0.8, 'pass', 0)) { agent.lobCD = 0.3; agent.kickCD = 0.2; }
+      }
+      
+      agent.vel.y+=-22*dt;
+      agent.pos.x+=agent.vel.x*dt; agent.pos.y+=agent.vel.y*dt; agent.pos.z+=agent.vel.z*dt;
+      
+      if(agent.pos.y<=PR){agent.pos.y=PR;agent.vel.y=0;agent.onGround=true;}else agent.onGround=false;
+      
+      if(Math.abs(agent.pos.x)>hw-PR){
+         agent.pos.x=Math.sign(agent.pos.x)*(hw-PR);
+         if (!agent.onGround && jump && Math.abs(agent.vel.x) > 3) {
+             agent.vel.y += 15 * dt; 
+         }
+         agent.vel.x*=-0.15; agent.dashT=0;
+      }
+      if(halfSign>0&&agent.pos.z<0.1){agent.pos.z=0.1;if(agent.vel.z<0){agent.vel.z=0;agent.dashT=0;}}
+      if(halfSign<0&&agent.pos.z>-0.1){agent.pos.z=-0.1;if(agent.vel.z>0){agent.vel.z=0;agent.dashT=0;}}
+      if(Math.abs(agent.pos.z)>hd-PR){agent.pos.z=Math.sign(agent.pos.z)*(hd-PR);agent.vel.z*=-0.15;agent.dashT=0;}
+      
+      if (currentKickoff === 'A' && agent.team === 'B') {
+          if (agent.pos.z < 0.5) { agent.pos.z = 0.5; agent.vel.z = Math.max(0, agent.vel.z); }
+      }
+      if (currentKickoff === 'B' && agent.team === 'A') {
+          if (agent.pos.z > -0.5) { agent.pos.z = -0.5; agent.vel.z = Math.min(0, agent.vel.z); }
+      }
+      
+      bumperHit(agent,PR);
+    };
+
+    const runBot = (agent, isTeamA, dt) => {
+        if (agent.botDelay === undefined) agent.botDelay = 0;
+        if (agent.botInp === undefined) agent.botInp = { mx: 0, mz: 0, aimX: 0, aimZ: isTeamA ? 1 : -1, j: false, flick: false, chargeStraight: false, pass: false, d: false };
+
+        agent.botDelay -= dt;
+        if (agent.botDelay <= 0) {
+            let txb=ball.pos.x+ball.vel.x*cfg.pred, tzb=ball.pos.z+ball.vel.z*cfg.pred, tx,tz;
+            
+            const isGoalie = (is2v2 && (agent.id === 'p3' || agent.id === 'p4'));
+            const defendingZ = isTeamA ? -hd + 1.5 : hd - 1.5;
+            const enemyGoalZ = isTeamA ? hd : -hd;
+            const distBallGoal = Math.abs(ball.pos.z - defendingZ);
+            const d2b = ball.pos.clone().sub(agent.pos).length(); 
+
+            if (isGoalie) {
+                if (distBallGoal < 7.0 || d2b < 4.0) {
+                    tx = txb; tz = tzb;
+                } else {
+                    tx = clamp(txb, -GW/2 + 0.5, GW/2 - 0.5);
+                    tz = defendingZ;
+                }
+            } else {
+                tx = txb; tz = tzb;
+                
+                if (Math.abs(txb) > hw - 2.5) {
+                    tx += Math.sign(txb) * 0.8; 
+                }
+                if (Math.abs(tzb) > hd - 2.5) {
+                    tz += Math.sign(tzb) * 0.8; 
+                }
+
+                if ((difficulty === 'zaawansowany' || difficulty === 'hardcore') && d2b > 1.5) {
+                    tz -= Math.sign(enemyGoalZ) * 0.5; 
+                }
+            }
+            
+            let dx=tx-agent.pos.x, dz=tz-agent.pos.z, dd=Math.sqrt(dx*dx+dz*dz);
+            
+            if (dd > 0.2) {
+                agent.botInp.mx = dx/dd; agent.botInp.mz = dz/dd; 
+            } else { 
+                agent.botInp.mx=0; agent.botInp.mz=0; 
+            }
+            
+            agent.botInp.aimX = agent.botInp.mx || 0; agent.botInp.aimZ = agent.botInp.mz || (isTeamA ? 1 : -1);
+            agent.botInp.j = (agent.onGround&&ball.pos.y>1.5&&d2b<4.0&&Math.random()<cfg.jumpP);
+            
+            if (d2b < PR+BR+cfg.kickR) {
+                if (is2v2 && !isGoalie && Math.random() < 0.15) {
+                    agent.botInp.pass = true;
+                    agent.botInp.chargeStraight = false;
+                } else if (Math.random() < cfg.fakeP && d2b > PR+BR+0.5) {
+                    agent.botInp.chargeStraight = false; 
+                } else {
+                    if (!agent.botInp.chargeStraight) {
+                        agent.botInp.chargeStraight = true;
+                        agent.botInp.flick = false;
+                    } else if (agent.chargeT > 0.2 + Math.random() * 0.8) {
+                        agent.botInp.chargeStraight = false;
+                        agent.botDelay = 0.5; 
+                    }
+                }
+            } else {
+                agent.botInp.chargeStraight = false; agent.botInp.flick = false; agent.botInp.pass = false;
+            }
+            agent.botInp.d = (difficulty!=='nowicjusz' && dd>3.0 && agent.dashCD<=0 && !isGoalie);
+            
+            if(agent.botDelay <= 0) agent.botDelay = cfg.reactDelay + Math.random()*0.1;
+        }
+        
+        moveAgent(agent, agent.botInp.mx, agent.botInp.mz, agent.botInp.aimX, agent.botInp.aimZ, agent.botInp.j, agent.botInp.flick, agent.botInp.chargeStraight, agent.botInp.pass, agent.botInp.d, 0, cfg.spd, isTeamA ? -1 : 1, dt);
+        agent.botInp.flick = false;
+        agent.botInp.pass = false;
+    };
+
+    const checkPostHit = (b, px, pz, dt) => {
+        const dx = b.pos.x - px, dz = b.pos.z - pz;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        if (dist < 0.07 + BR && b.pos.y < GH + BR) { 
+            const nx = dx/dist, nz = dz/dist;
+            const dot = b.vel.x*nx + b.vel.z*nz;
+            if (dot < 0) { b.vel.x -= 1.8*dot*nx; b.vel.z -= 1.8*dot*nz; }
+            b.pos.x = px + nx*(0.07 + BR + 0.01); b.pos.z = pz + nz*(0.07 + BR + 0.01);
+        }
+    };
+
+    const simulateBallStep = (bVel, bPos, bSpin, sdt) => {
+        bVel.y += -22 * sdt;
+        const onFloor = bPos.y <= BR + 0.05;
+        
+        if (Math.abs(bSpin) > 0.05) {
+            const speed2D = Math.sqrt(bVel.x**2 + bVel.z**2);
+            if (speed2D > 0.5) {
+                const pX = -bVel.z / speed2D; 
+                const pZ = bVel.x / speed2D;
+                // Zwiększony mnożnik podkręcania w powietrzu!
+                bVel.x += pX * bSpin * sdt * 20.0; 
+                bVel.z += pZ * bSpin * sdt * 20.0;
+                bVel.x *= 1.0 - (0.12 * sdt); 
+                bVel.z *= 1.0 - (0.12 * sdt);
+            }
+        }
+        
+        const nextSpin = bSpin * (onFloor ? Math.pow(0.85, sdt*60) : Math.pow(0.98, sdt*60));
+        bVel.x *= onFloor ? Math.pow(0.78, sdt*60) : Math.pow(0.995, sdt*60);
+        bVel.z *= onFloor ? Math.pow(0.78, sdt*60) : Math.pow(0.995, sdt*60);
+        bPos.x += bVel.x * sdt; bPos.y += bVel.y * sdt; bPos.z += bVel.z * sdt;
+        
+        if(bPos.y <= BR){
+            bPos.y = BR;
+            if(bVel.y < -0.8) bVel.y *= -0.55; else bVel.y = 0;
+        }
+        if(bPos.y >= FH - BR){
+            bPos.y = FH - BR;
+            bVel.y *= -0.5;
+        }
+        if(Math.abs(bPos.x) >= hw - BR){
+            bPos.x = Math.sign(bPos.x) * (hw - BR);
+            bVel.x *= -0.75; 
+        }
+
+        const inGX = Math.abs(bPos.x) < GW/2 - 0.1;
+        const inGY = bPos.y < GH - 0.1;
+
+        if (bPos.z <= -hd + BR && !(inGX && inGY)) { 
+            bPos.z = -hd + BR; bVel.z *= -0.75; 
+        }
+        if (bPos.z >= hd - BR && !(inGX && inGY)) { 
+            bPos.z = hd - BR; bVel.z *= -0.75; 
+        }
+
+        if (bPos.z <= -hd - GD + BR) { bPos.z = -hd - GD + BR; bVel.z *= -0.4; }
+        if (bPos.z >= hd + GD - BR) { bPos.z = hd + GD - BR; bVel.z *= -0.4; }
+
+        return nextSpin;
+    };
+
+    const physicsTick=(dt)=>{
+      const sdt=dt/4;
+      for(let s=0;s<4;s++){
+        
+        ball.spin = simulateBallStep(ball.vel, ball.pos, ball.spin, sdt);
+        
+        [-hd, hd].forEach(goalZ => {
+            checkPostHit(ball, -GW/2, goalZ, sdt);
+            checkPostHit(ball, GW/2, goalZ, sdt);
+            if (Math.abs(ball.pos.x) < GW/2 + BR && Math.abs(ball.pos.z - goalZ) < BR) {
+               if (Math.abs(ball.pos.y - GH) < 0.07 + BR) {
+                   if (ball.vel.y < 0 && ball.pos.y > GH) { ball.vel.y *= -0.8; ball.pos.y = GH + 0.07 + BR; }
+                   else if (ball.vel.y > 0 && ball.pos.y < GH) { ball.vel.y *= -0.8; ball.pos.y = GH - 0.07 - BR; }
+                   ball.vel.z *= -0.5; 
+               }
+            }
+        });
+        
+        agents.forEach(ag => {
+            if (!disconnectedRoles.current.has(ag.id)) softContact(ball, ag, sdt);
+        });
+        for(let i=0; i<agents.length; i++) {
+          for(let j=i+1; j<agents.length; j++) {
+            if (!disconnectedRoles.current.has(agents[i].id) && !disconnectedRoles.current.has(agents[j].id)) {
+                playerContact(agents[i], agents[j], sdt);
+            }
+          }
+        }
+        bumperHit(ball,BR);
+      }
+    };
+
+    // ================================================================
+    // GŁÓWNA PĘTLA UPDATE
+    // ================================================================
+    const update=(dt)=>{
+      if (isMatchOver) return;
+      dt=Math.min(dt,0.045);
+      netTick += dt;
+      
+      if(scoreRef.current) scoreRef.current.textContent=`${score.a} : ${score.b}`;
+
+      if (shakeTime > 0) {
+        shakeTime -= dt;
+        camera.position.set(baseCamPos.x + (Math.random() - 0.5) * shakeIntensity, baseCamPos.y + (Math.random() - 0.5) * shakeIntensity, baseCamPos.z + (Math.random() - 0.5) * shakeIntensity);
+      } else { camera.position.copy(baseCamPos); }
+      camera.lookAt(0,0,0);
+
+      agents.forEach(ag => {
+          if (disconnectedRoles.current.has(ag.id)) {
+              ag.pos.y = -100;
+              ag.vel.set(0,0,0);
+          }
+      });
+
+      if (!isMatchOver && goalTimer <= 0 && timeLimit > 0) {
+          timerSeconds -= dt;
+          if (timerSeconds <= 0) {
+              timerSeconds = 0;
+              isMatchOver = true;
+              let label = "";
+              const mTeam = (effectiveRole === 'p1' || effectiveRole === 'p3') ? 'a' : 'b';
+              
+              if (score.a > score.b) {
+                  label = mode.startsWith('online') ? (mTeam === 'a' ? t.winnerYou : t.winnerOpp) : (is2v2 ? t.winnerTeamA : "Wygrana!");
+              } else if (score.b > score.a) {
+                  label = mode.startsWith('online') ? (mTeam === 'b' ? t.winnerYou : t.winnerOpp) : (is2v2 ? t.winnerTeamB : "Przegrana!");
+              } else {
+                  label = t.draw; 
+              }
+
+              if (socket && mode === 'online-client' && score.a !== score.b) {
+                  socket.emit('matchComplete', { roomId, winnerTeam: score.a > score.b ? 'a' : 'b' });
+              }
+              setGameOver({ winnerLabel: label });
+          }
+      }
+
+      if (timeRef.current) {
+          if (timeLimit === 0) timeRef.current.textContent = "∞";
+          else {
+              const m = Math.floor(Math.max(0, timerSeconds) / 60);
+              const s = Math.floor(Math.max(0, timerSeconds) % 60);
+              timeRef.current.textContent = `${m}:${s < 10 ? '0'+s : s}`;
+          }
+      }
+
+      if (goalTimer > 0) {
+        goalTimer -= dt;
+        const fade = Math.max(0, goalTimer/2.5);
+        scene.background.setRGB(0.02+fade*0.25, 0.04+fade*0.12, 0.06);
+        
+        if(msgRef.current){
+            msgRef.current.textContent = msgText;
+            msgRef.current.style.opacity = String(Math.min(goalTimer*2, 1));
+        }
+
+        if (goalTimer <= 0) {
+          if(msgRef.current) msgRef.current.style.opacity = '0';
+          if (scoreLimit > 0 && (score.a >= scoreLimit || score.b >= scoreLimit)) {
+            isMatchOver = true;
+            let label = score.a >= scoreLimit ? (mode==='multi'? t.p1 : t.winnerYou) : (mode==='multi'? t.p2 : t.loserYou);
+            if (is2v2 && mode !== 'online-client') label = score.a >= scoreLimit ? t.winnerTeamA : t.winnerTeamB;
+            
+            if (mode === 'online-client' || mode === 'online-host') {
+                const mTeam = (effectiveRole === 'p1' || effectiveRole === 'p3') ? 'a' : 'b';
+                const won = score[mTeam] >= scoreLimit;
+                label = won ? t.winnerYou : t.winnerOpp;
+                if(socket && mode === 'online-client') socket.emit('matchComplete', { roomId, winnerTeam: score.a >= scoreLimit ? 'a' : 'b' });
+            }
+            setGameOver({ winnerLabel: label });
+          } else {
+            scene.background.setHex(0x06090f);
+            reset(pendingReset);
+            pendingReset = null;
+          }
+        }
+      } else {
+        scene.background.setHex(0x06090f);
+        if(msgRef.current) msgRef.current.style.opacity = '0';
+      }
+
+      const myP = agents.find(a => a.id === effectiveRole) || p1;
+
+      let jumpL = false, dashL = false, passL = false, flickL = false;
+      let chargeStraightL = false;
+
+      let rawMx=0, rawMz=0;
+      let aimX=0, aimZ=1;
+      let useRawAim = false;
+
+      if (oneShot.current.flick) { flickL = true; oneShot.current.flick = false; }
+      if (oneShot.current.pass) { passL = true; oneShot.current.pass = false; }
+      if (oneShot.current.jump) { jumpL = true; oneShot.current.jump = false; }
+      if (oneShot.current.dash) { dashL = true; oneShot.current.dash = false; }
+
+      if (inputState.keys['Space']) jumpL = true;
+      if (inputState.keys['ShiftLeft']) dashL = true;
+
+      const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const gp = gamepads[0];
+      let gpActive = false;
+
+      if (gp) {
+          gpActive = true;
+          if (Math.abs(gp.axes[0]) > 0.15 || Math.abs(gp.axes[1]) > 0.15) {
+              rawMx = gp.axes[0]; rawMz = gp.axes[1];
+          }
+          
+          let rightStickL = Math.sqrt(gp.axes[2]**2 + gp.axes[3]**2);
+          if (rightStickL > 0.15) {
+              aimX = gp.axes[2] * flipSign; aimZ = gp.axes[3] * flipSign;
+              useRawAim = true;
+          }
+
+          if (gp.buttons[0]?.pressed) jumpL = true; 
+          if (gp.buttons[1]?.pressed) dashL = true; 
+          
+          const gpPass = gp.buttons[2]?.pressed || gp.buttons[3]?.pressed;
+          gpPrev.current.pass = gpPass;
+          if (gpPass) passL = true;
+          
+          const gpFlick = gp.buttons[5]?.pressed || gp.buttons[4]?.pressed;
+          gpPrev.current.flick = gpFlick;
+          if (gpFlick) flickL = true;
+          
+          const rtPressed = gp.buttons[7]?.pressed || gp.buttons[6]?.pressed;
+          if (rtPressed) {
+              chargeStraightL = true;
+              myP.spinCharge += gp.axes[2] * dt * 15;
+          } else {
+              myP.spinCharge = 0;
+          }
+      }
+
+      if (isMobileDevice) {
+        const ti = touchInputs.current;
+        rawMx = ti.mx; rawMz = ti.mz;
+        if (Math.abs(ti.aimX) > 0 || Math.abs(ti.aimZ) > 0) {
+            aimX = ti.aimX * flipSign; aimZ = ti.aimZ * flipSign;
+            useRawAim = true;
+        }
+        
+        chargeStraightL = ti.chargeStraight || chargeStraightL; 
+        jumpL = ti.jump || jumpL; dashL = ti.dash || dashL;
+        
+        if (ti.pass) { passL = true; ti.pass = false; }
+        if (ti.flick) { flickL = true; ti.flick = false; }
+        
+        if (ti.chargeCurve) myP.spinCharge = ti.spinCharge; 
+        if (!ti.chargeCurve) ti.spinCharge = 0; 
+      } else if (!gpActive) {
+        rawMx=(inputState.keys['KeyD']?1:0)-(inputState.keys['KeyA']?1:0); 
+        rawMz=(inputState.keys['KeyS']?1:0)-(inputState.keys['KeyW']?1:0);
+        
+        if (controls === 'mouse') {
+          chargeStraightL = inputState.lmbDown;
+          
+          raycaster.setFromCamera(inputState.mouse, camera);
+          const targetPoint = new THREE.Vector3();
+          raycaster.ray.intersectPlane(groundPlane, targetPoint);
+          if (targetPoint) {
+              const mouseVec = targetPoint.clone().sub(myP.pos).normalize();
+              aimX = mouseVec.x; aimZ = mouseVec.z;
+              useRawAim = true;
+          }
+          
+          if (chargeStraightL) {
+             let deltaX = inputState.mouse.x - dragStartX.current;
+             if (Math.abs(deltaX) < 0.05) deltaX = 0; 
+             myP.spinCharge = deltaX * 12.0; 
+          } else {
+             myP.spinCharge = 0;
+          }
+        } else {
+          chargeStraightL = !!inputState.keys['KeyF'];
+          
+          if (chargeStraightL) {
+            if (inputState.keys['KeyA']) myP.spinCharge += dt * -12; 
+            if (inputState.keys['KeyD']) myP.spinCharge += dt * 12; 
+          } else {
+             myP.spinCharge = 0;
+          }
+        }
+      }
+
+      // [POPRAWKA] Zwiększony max spin, żeby rogal znowu był soczysty
+      myP.spinCharge = clamp(myP.spinCharge, -2.2, 2.2);
+      
+      if (Math.abs(myP.spinCharge) < 0.15) {
+          myP.spinCharge = 0;
+      }
+      
+      let spinReq = myP.spinCharge;
+
+      let mxLocal = rawMx * flipSign;
+      let mzLocal = rawMz * flipSign;
+      
+      if (!useRawAim) {
+          if (mxLocal !== 0 || mzLocal !== 0) {
+              const l = Math.sqrt(mxLocal*mxLocal + mzLocal*mzLocal);
+              aimX = mxLocal / l; aimZ = mzLocal / l;
+          } else { 
+              aimX = myP.dir.x; aimZ = myP.dir.z; 
+          }
+      }
+
+      if (mode === 'online-client') {
+          const distToBall = Math.sqrt((ball.pos.x - myP.pos.x)**2 + (ball.pos.z - myP.pos.z)**2);
+          if (distToBall < PR + BR + 0.8) {
+              ignoreServerBallUntil.current = performance.now() + 150;
+          }
+      }
+
+      moveAgent(myP, mxLocal, mzLocal, aimX, aimZ, jumpL, flickL, chargeStraightL, passL, dashL, spinReq, 9, isTeamA ? -1 : 1, dt);
+
+      if (mode === 'online-client') {
+        const sState = serverStateRef.current;
+        if (sState) {
+          const ownsBall = performance.now() <= ignoreServerBallUntil.current;
+          const sBall = new THREE.Vector3(sState.ball.pos.x, sState.ball.pos.y, sState.ball.pos.z);
+          const bDist = ball.pos.distanceTo(sBall);
+          
+          if (!ownsBall) {
+              if (bDist > 4.0) ball.pos.copy(sBall);
+              else ball.pos.lerp(sBall, 0.2); 
+              ball.vel.lerp(new THREE.Vector3(sState.ball.vel.x, sState.ball.vel.y, sState.ball.vel.z), 0.2);
+              ball.spin = sState.ball.spin || 0;
+          } else {
+              if (bDist > 15.0) ball.pos.copy(sBall); 
+          }
+
+          agents.forEach(ag => {
+              const sData = sState[ag.id];
+              if (!sData) return;
+              
+              if (ag.id !== myP.id) { 
+                  const sPos = new THREE.Vector3(sData.pos.x, sData.pos.y, sData.pos.z);
+                  if (ag.pos.distanceTo(sPos) > 3.0) ag.pos.copy(sPos);
+                  else ag.pos.lerp(sPos, 0.3); 
+                  ag.vel.set(sData.vel.x, sData.vel.y, sData.vel.z);
+                  ag.dir.set(sData.dir.x, sData.dir.y, sData.dir.z);
+                  ag.chargeT = sData.chargeT;
+                  ag.dashT = sData.dashT;
+                  ag.onGround = sData.onGround;
+              } else {
+                  const sPos = new THREE.Vector3(sData.pos.x, sData.pos.y, sData.pos.z);
+                  if (ag.pos.distanceTo(sPos) > 8.0) ag.pos.copy(sPos); 
+              }
+          });
+
+          score.a = sState.score.a; score.b = sState.score.b;
+          timerSeconds = sState.timerSeconds;
+          
+          if (sState.currentKickoff) currentKickoff = sState.currentKickoff;
+          
+          if (sState.goalTimer > 0 && goalTimer <= 0) { 
+              goalTimer = sState.goalTimer; 
+              msgText = sState.msgText; 
+          }
+          
+          serverStateRef.current = null;
+        }
+        
+        physicsTick(dt);
+      } 
+      else if (mode === 'online-host') {
+        agents.forEach(ag => {
+            if (ag.id !== myP.id) {
+                const rData = remoteInputs.current[ag.id];
+                if (rData && rData.isState) {
+                    const cPos = new THREE.Vector3(rData.pos.x, rData.pos.y, rData.pos.z);
+                    
+                    ag.pos.copy(cPos);
+                    ag.vel.set(rData.vel.x, rData.vel.y, rData.vel.z);
+                    ag.dir.set(rData.dir.x, rData.dir.y, rData.dir.z);
+                    ag.onGround = rData.onGround;
+
+                    const wasCharging = prevChargingStraight[ag.id] || false;
+                    const isCharging = rData.chargingStraight || false;
+                    
+                    if (isCharging) {
+                        ag.chargeT = Math.min((ag.chargeT || 0) + dt * 0.65, 1.5);
+                        ag.chargingStraight = true;
+                        ag.spinCharge = rData.spinCharge || 0;
+                    } else if (wasCharging && !isCharging) {
+                        ag.chargingStraight = false;
+                        if (ag.chargeT < 0.25) {
+                            doKick(ag, 1.0, 'flick', 0, true); 
+                            ag.lobCD = 0.3; ag.kickCD = 0.2;
+                        } else {
+                            doKick(ag, 1.0 + ag.chargeT * 1.5, 'straight', rData.spinCharge || 0, true); 
+                            ag.kickCD = 0.2;
+                        }
+                        ag.chargeT = 0;
+                        ag.spinCharge = 0;
+                    } else {
+                        ag.chargingStraight = false;
+                        ag.chargeT = rData.chargeT || 0;
+                    }
+                    prevChargingStraight[ag.id] = isCharging;
+
+                    ag.lastPassCount = ag.lastPassCount || 0;
+                    if (rData.passCount > ag.lastPassCount) {
+                        doKick(ag, 0.8, 'pass', 0, true);
+                        ag.lobCD = 0.3; ag.kickCD = 0.2;
+                        ag.lastPassCount = rData.passCount;
+                    }
+                    
+                    ag.lastFlickCount = ag.lastFlickCount || 0;
+                    if (rData.flickCount > ag.lastFlickCount) {
+                        doKick(ag, 1.0, 'flick', 0, true);
+                        ag.lobCD = 0.3; ag.kickCD = 0.2;
+                        ag.lastFlickCount = rData.flickCount;
+                    }
+
+                    if (rData.ballState) {
+                        const bPos = new THREE.Vector3(rData.ballState.pos.x, rData.ballState.pos.y, rData.ballState.pos.z);
+                        if (ball.pos.distanceTo(bPos) < 15.0) { 
+                            ball.pos.copy(bPos);
+                            ball.vel.set(rData.ballState.vel.x, rData.ballState.vel.y, rData.ballState.vel.z);
+                            ball.spin = rData.ballState.spin || 0;
+                        }
+                    }
+                }
+            }
+        });
+        
+        physicsTick(dt);
+
+        const inGX = Math.abs(ball.pos.x) < GW/2 - 0.1; 
+        const inGY = ball.pos.y < GH - 0.1;
+
+        if(ball.pos.z <= -hd - 0.15) { 
+          if(inGX && inGY && !isMatchOver && goalTimer <= 0){ score.b++; msgText='GOL!'; goalTimer=2.5; pendingReset='B'; triggerShake(0.5, 0.8); if(socket) socket.emit('gameEvent',{roomId, type:'shake', power:0.8}); } 
+        }
+        if(ball.pos.z >= hd + 0.15) { 
+          if(inGX && inGY && !isMatchOver && goalTimer <= 0){ score.a++; msgText='GOL!'; goalTimer=2.5; pendingReset='A'; triggerShake(0.5, 0.8); if(socket) socket.emit('gameEvent',{roomId, type:'shake', power:0.8}); } 
+        }
+      } 
+      else if (mode === 'multi') {
+        const mx2_raw=(inputState.keys['ArrowRight']?1:0)-(inputState.keys['ArrowLeft']?1:0);
+        const mz2_raw=(inputState.keys['ArrowDown']?1:0)-(inputState.keys['ArrowUp']?1:0);
+        
+        const p2flipSign = -1;
+        const mx2 = mx2_raw * p2flipSign;
+        const mz2 = mz2_raw * p2flipSign;
+
+        let l2 = Math.sqrt(mx2*mx2 + mz2*mz2) || 1;
+        let aimX2 = mx2, aimZ2 = mz2;
+        if (mx2 === 0 && mz2 === 0) { aimX2 = p2.dir.x; aimZ2 = p2.dir.z; } else { aimX2 /= l2; aimZ2 /= l2; }
+
+        let spinReq2 = 0;
+        if (inputState.keys['Numpad0']) {
+           if (inputState.keys['ArrowLeft']) spinReq2 += dt * -12;
+           if (inputState.keys['ArrowRight']) spinReq2 += dt * 12;
+        }
+        p2.spinCharge = clamp(p2.spinCharge + spinReq2, -2.2, 2.2);
+        if (!inputState.keys['Numpad0']) p2.spinCharge = 0;
+
+        let p2Flick = !!inputState.keys['Numpad2'] && !p2.chargingStraight && p2.kickCD <= 0;
+        let p2Pass = !!inputState.keys['Numpad3'] && !p2.chargingStraight && p2.kickCD <= 0;
+        let p2Charge = !!inputState.keys['Numpad0'];
+
+        moveAgent(p2, mx2, mz2, aimX2, aimZ2, !!inputState.keys['ShiftRight'], p2Flick, p2Charge, p2Pass, !!inputState.keys['Enter'], p2.spinCharge, 9, -1, dt);
+        
+        if (is2v2) { runBot(p3, true, dt); runBot(p4, false, dt); }
+        physicsTick(dt);
+        
+        const inGX = Math.abs(ball.pos.x) < GW/2 - 0.1; 
+        const inGY = ball.pos.y < GH - 0.1;
+        if(ball.pos.z <= -hd - 0.15) { if(inGX && inGY && !isMatchOver && goalTimer <= 0){ score.b++; msgText='GOL!'; goalTimer=2.5; pendingReset='B'; triggerShake(0.5, 0.8); } }
+        if(ball.pos.z >= hd + 0.15) { if(inGX && inGY && !isMatchOver && goalTimer <= 0){ score.a++; msgText='GOL!'; goalTimer=2.5; pendingReset='A'; triggerShake(0.5, 0.8); } }
+      } 
+      else { 
+        agents.forEach(ag => {
+            if (ag.id !== myP.id && !disconnectedRoles.current.has(ag.id)) runBot(ag, ag.team==='A', dt);
+        });
+        physicsTick(dt);
+        
+        const inGX = Math.abs(ball.pos.x) < GW/2 - 0.1; 
+        const inGY = ball.pos.y < GH - 0.1;
+        if(ball.pos.z <= -hd - 0.15) { if(inGX && inGY && !isMatchOver && goalTimer <= 0){ score.b++; msgText='GOL!'; goalTimer=2.5; pendingReset='B'; triggerShake(0.5, 0.8); } }
+        if(ball.pos.z >= hd + 0.15) { if(inGX && inGY && !isMatchOver && goalTimer <= 0){ score.a++; msgText='GOL!'; goalTimer=2.5; pendingReset='A'; triggerShake(0.5, 0.8); } }
+      }
+
+      if (socket && netTick >= NETWORK_RATE) {
+          netTick = 0;
+          if (mode === 'online-client') {
+              const myP = agents.find(a => a.id === effectiveRole) || p1;
+              const ownsBall = performance.now() <= ignoreServerBallUntil.current;
+              socket.emit('clientInput', { 
+                  roomId, role: myP.id, 
+                  input: { 
+                      isState: true, 
+                      pos: {x: myP.pos.x, y: myP.pos.y, z: myP.pos.z}, 
+                      vel: {x: myP.vel.x, y: myP.vel.y, z: myP.vel.z}, 
+                      dir: {x: myP.dir.x, y: myP.dir.y, z: myP.dir.z}, 
+                      chargeT: myP.chargeT, onGround: myP.onGround,
+                      chargingStraight: myP.chargingStraight,
+                      spinCharge: myP.spinCharge,
+                      passCount: myP.passCount || 0,
+                      flickCount: myP.flickCount || 0,
+                      ballState: ownsBall ? {
+                          pos: {x: ball.pos.x, y: ball.pos.y, z: ball.pos.z},
+                          vel: {x: ball.vel.x, y: ball.vel.y, z: ball.vel.z},
+                          spin: ball.spin
+                      } : null
+                  } 
+              });
+          } else if (mode === 'online-host') {
+              let stateObj = {
+                  ball: { pos: {x:ball.pos.x,y:ball.pos.y,z:ball.pos.z}, vel: {x:ball.vel.x,y:ball.vel.y,z:ball.vel.z}, spin: ball.spin },
+                  p1: { pos:{x:p1.pos.x,y:p1.pos.y,z:p1.pos.z}, vel:{x:p1.vel.x,y:p1.vel.y,z:p1.vel.z}, chargeT: p1.chargeT, dashT: p1.dashT, dashCD: p1.dashCD, dir:{x:p1.dir.x,y:p1.dir.y,z:p1.dir.z}, onGround: p1.onGround },
+                  p2: { pos:{x:p2.pos.x,y:p2.pos.y,z:p2.pos.z}, vel:{x:p2.vel.x,y:p2.vel.y,z:p2.vel.z}, chargeT: p2.chargeT, dashT: p2.dashT, dashCD: p2.dashCD, dir:{x:p2.dir.x,y:p2.dir.y,z:p2.dir.z}, onGround: p2.onGround },
+                  score: { a: score.a, b: score.b }, goalTimer, msgText, currentKickoff, pendingReset, timerSeconds
+              };
+              if (is2v2) {
+                  stateObj.p3 = { pos:{x:p3.pos.x,y:p3.pos.y,z:p3.pos.z}, vel:{x:p3.vel.x,y:p3.vel.y,z:p3.vel.z}, chargeT: p3.chargeT, dashT: p3.dashT, dashCD: p3.dashCD, dir:{x:p3.dir.x,y:p3.dir.y,z:p3.dir.z}, onGround: p3.onGround };
+                  stateObj.p4 = { pos:{x:p4.pos.x,y:p4.pos.y,z:p4.pos.z}, vel:{x:p4.vel.x,y:p4.vel.y,z:p4.vel.z}, chargeT: p4.chargeT, dashT: p4.dashT, dashCD: p4.dashCD, dir:{x:p4.dir.x,y:p4.dir.y,z:p4.dir.z}, onGround: p4.onGround };
+              }
+              socket.emit('hostState', { roomId, state: stateObj });
+          }
+      }
+
+      const myPVisual = agents.find(a => a.id === effectiveRole) || p1;
+      
+      ballM.position.copy(ball.pos); ballSh.position.set(ball.pos.x,0.02,ball.pos.z); ballSh.material.opacity=clamp(0.4*(1-ball.pos.y/6),0,0.42);
+      
+      const bspd2D=Math.sqrt(ball.vel.x**2 + ball.vel.z**2); 
+      if(bspd2D>0.1 && ball.vel.y>-20 && !isNaN(ball.vel.x) && !isNaN(ball.vel.z)) {
+        ballM.rotateOnWorldAxis(new THREE.Vector3(-ball.vel.z,0,ball.vel.x).normalize(), bspd2D*dt*1.1);
+      }
+      if (Math.abs(ball.spin) > 0.1) ballM.rotateOnWorldAxis(new THREE.Vector3(0,1,0), ball.spin * dt * -6);
+
+      ballGlow.position.copy(ball.pos); ballGlow.material.opacity = clamp((bspd2D - 15) / 20, 0, 0.6);
+      
+      p1G.position.copy(p1.pos); p2G.position.copy(p2.pos);
+      p1G.children[1].position.set(p1.dir.x * 0.15, PR + 0.5, p1.dir.z * 0.15); 
+      p2G.children[1].position.set(p2.dir.x * 0.15, PR + 0.5, p2.dir.z * 0.15);
+      
+      if (is2v2) {
+         p3G.position.copy(p3.pos); p3G.children[1].position.set(p3.dir.x * 0.15, PR + 0.5, p3.dir.z * 0.15);
+         p4G.position.copy(p4.pos); p4G.children[1].position.set(p4.dir.x * 0.15, PR + 0.5, p4.dir.z * 0.15);
+      } else {
+         p3G.position.y = -100; p4G.position.y = -100;
+      }
+
+      if(myPVisual.dashT>0){trailMesh.position.set(myPVisual.pos.x,myPVisual.pos.y,myPVisual.pos.z);trailMesh.material.opacity=myPVisual.dashT/DASH_DURATION*0.55;} else trailMesh.material.opacity=0;
+
+      if(dashBarRef.current){
+        const ready=myPVisual.dashCD<=0,pct=ready?100:Math.round((1-myPVisual.dashCD/DASH_COOLDOWN)*100);
+        dashBarRef.current.style.width=pct+'%'; dashBarRef.current.style.background=ready?(myPVisual.dashT>0?'#22aa88':'#338855'):'#aaa';
+        if(dashLblRef.current) dashLblRef.current.textContent=ready?(myPVisual.dashT>0?t.dashWait:t.dashReady):`${t.dashWait} ${pct}%`;
+      }
+
+      if(chargeRef.current && chargeContainerRef.current){
+          const pct = Math.min(100, Math.round((myPVisual.chargeT / 1.5) * 100));
+          chargeRef.current.style.width = pct + '%';
+          
+          if (pct > 0) {
+              chargeContainerRef.current.style.opacity = '1';
+              chargeContainerRef.current.style.transform = `translateX(-50%) scale(${1 + pct*0.002})`;
+              if(chargeTextRef.current) {
+                  if(pct > 95) chargeTextRef.current.textContent = "MAX POWER!";
+                  else if(pct > 60) chargeTextRef.current.textContent = "STRONG";
+                  else chargeTextRef.current.textContent = "";
+              }
+          } else {
+              chargeContainerRef.current.style.opacity = '0';
+              chargeContainerRef.current.style.transform = `translateX(-50%) scale(1)`;
+          }
+      }
+
+      if (currentKickoff === 'A') {
+          kickoffBarrier.position.set(0, FH/2, 0); kickoffBarrier.material.color.setHex(teamAColor); kickoffBarrier.material.opacity = 0.25;
+      } else if (currentKickoff === 'B') {
+          kickoffBarrier.position.set(0, FH/2, 0); kickoffBarrier.material.color.setHex(teamBColor); kickoffBarrier.material.opacity = 0.25;
+      } else {
+          kickoffBarrier.material.opacity = 0;
+      }
+
+      const distToBall2D=Math.sqrt((ball.pos.x-myPVisual.pos.x)**2+(ball.pos.z-myPVisual.pos.z)**2);
+      const kickRadius=myPVisual.onGround?PR+BR+1.5:PR+BR+2.8;
+      const inRange=distToBall2D<kickRadius+0.5;
+      p1Range.position.set(myPVisual.pos.x,0.05,myPVisual.pos.z);
+      p1Range.geometry.dispose(); p1Range.geometry=new THREE.RingGeometry(kickRadius-0.1,kickRadius+0.12,36);
+      p1Range.material.opacity=inRange?0.55:clamp(0.45-distToBall2D*0.07,0,0.25);
+      p1Range.material.color.setHex(inRange?0x00ff88:0x225533);
+
+      if(inRange){
+        let ax = myPVisual.dir.x; 
+        let az = myPVisual.dir.z;
+        arrowGroup.position.set(ball.pos.x, 0.1, ball.pos.z); 
+        arrowGroup.rotation.y = Math.atan2(ax, az);
+        arrowShaft.material.opacity=0.85; arrowHead.material.opacity=0.85;
+      } else {arrowShaft.material.opacity=0; arrowHead.material.opacity=0;}
+
+      if(myPVisual.chargeT>0.05 && inRange){
+        const power=1.0+myPVisual.chargeT*1.5;
+        let ax = myPVisual.dir.x; 
+        let az = myPVisual.dir.z;
+        const al=Math.sqrt(ax*ax+az*az)||1;
+        
+        let sVel = new THREE.Vector3((ax/al)*17*power, myPVisual.onGround ? 5 + power * 2.5 : 8 + power * 3, (az/al)*17*power);
+        let sPos = ball.pos.clone();
+        
+        const spinSim = myPVisual.spinCharge === 0 ? 0 : myPVisual.spinCharge * power;
+        let sSpin = spinSim;
+        const newPts=[];
+        
+        const simDt = 0.014; 
+        for(let i=0; i<35; i++){
+            newPts.push(sPos.clone());
+            sSpin = simulateBallStep(sVel, sPos, sSpin, simDt);
+        }
+        trajGeo.setFromPoints(newPts); 
+        trajLine.material.opacity=0.8; 
+        trajLine.material.color.setHex(power>2.5?0xff4400:0x00ffaa);
+      } else trajLine.material.opacity=0;
+
+      chargeRingMesh.position.set(myPVisual.pos.x,0.08,myPVisual.pos.z);
+      chargeRingMesh.geometry.dispose(); chargeRingMesh.geometry=new THREE.RingGeometry(PR+0.18,PR+0.42,32,1,0,Math.max(0.001,myPVisual.chargeT/1.5*Math.PI*2));
+      chargeRingMesh.material.opacity=myPVisual.chargeT>0?0.9:0; chargeRingMesh.material.color.setHex(myPVisual.chargeT>1.0?0xff3300:0xffff00);
+    };
+
+    const loop=()=>{animId=requestAnimationFrame(loop);const now=performance.now();update((now-lastT)/1000);lastT=now;renderer.render(scene,camera);};
+    loop();
+    const onResize=()=>{const w=mount.clientWidth,h=mount.clientHeight;renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();};
+    window.addEventListener('resize',onResize); setTimeout(onResize,30);
+    return()=>{
+      cancelAnimationFrame(animId); 
+      if(socket) { socket.off('opponentInput'); socket.off('gameState'); socket.off('triggerEvent'); socket.off('chatMessage'); socket.off('playerLeft'); }
+      renderer.dispose(); if(mount.contains(renderer.domElement))mount.removeChild(renderer.domElement);
+    };
+  },[mode, difficulty, roomId, role, effectiveRole, controls, playerColor, playerName, scoreLimit, timeLimit, is2v2, lang, t]);
+
+  const sendChat = (e) => {
+    e.preventDefault();
+    if (!chatInput.trim()) { isTyping.current = false; return; }
+    const pRoleLabel = effectiveRole ? t[effectiveRole] || effectiveRole : (mode==='online-client' ? t.p2 : t.p1);
+    const msg = { text: chatInput.trim(), sender: playerName || pRoleLabel, roomId };
+    if (socket && mode.startsWith('online')) socket.emit('chatMessage', msg);
+    else setChatMessages(prev => [...prev, msg].slice(-10));
+    setChatInput("");
+    isTyping.current = false;
+  };
+
+  let rightLabel = is2v2 ? `${t.bot} & ${t.bot}` : `${t.bot} (${BOT_CFG[difficulty] ? t[difficulty] || difficulty : ''})`;
+  if (mode === 'multi') rightLabel = is2v2 ? `${t.bot} & ${t.bot}` : t.p2;
+  if (mode.startsWith('online')) rightLabel = t.opponent;
+  let leftLabel = mode === 'online-client' ? t.client : t.host;
+  if (mode === 'bot') leftLabel = is2v2 ? `Ty & ${t.bot}` : 'Ty';
+  if (mode === 'multi') leftLabel = is2v2 ? `P1 & P2` : t.p1;
+
+  const currentControls = controls === 'mouse' ? t.controlsMapMouse : t.controlsMapKbd;
+
+  const btnStyle = (bg, border) => ({
+      width:'100%', height:'100%', borderRadius:'50%', 
+      background: bg, color:'#fff', border:`2px solid ${border}`, fontSize:10, fontWeight:'bold', 
+      touchAction:'none', display:'flex', justifyContent:'center', alignItems:'center', 
+      userSelect:'none', WebkitUserSelect:'none', boxShadow:'0 4px 10px rgba(0,0,0,0.5)'
+  });
+
+  return(
+    <div style={{width:'100dvw',height:'100dvh',display:'flex',flexDirection:'column',background:'#06090f',fontFamily:'Tahoma,Geneva,sans-serif',overflow:'hidden', cursor: controls==='mouse' ? 'crosshair' : 'default', touchAction: 'none'}}>
+      <div style={{background:'#1a1a1a',borderBottom:'1px solid #333',padding:'0 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0,height:36}}>
+        <button onClick={() => { if(socket) socket.disconnect(); window.location.reload(); }} style={{background:'none',border:'1px solid #444',color:'#aaa',cursor:'pointer',fontFamily:'inherit',fontSize:11,padding:'2px 10px'}}>{t.leave}</button>
+        <div style={{display:'flex',alignItems:'center',gap:16}}>
+          <span style={{color:'#3c3',fontSize:12,fontWeight:'bold'}}>{leftLabel}</span>
+          <span ref={scoreRef} style={{color:'#fff',fontSize:24,fontWeight:'bold',letterSpacing:8,minWidth:90,textAlign:'center'}}>0 : 0</span>
+          <span style={{color:mode==='multi'?'#f80':'#e44',fontSize:12,fontWeight:'bold'}}>{rightLabel}</span>
+        </div>
+        <div style={{display:'flex', alignItems:'center', gap: 12}}>
+            <span ref={timeRef} style={{color:'#fff',fontSize:15,fontWeight:'bold',letterSpacing:2}}>--:--</span>
+            <span style={{fontSize:10,color:'#555'}}>{t.limit} {scoreLimit}</span>
+        </div>
+      </div>
+
+      <div style={{flex:1,position:'relative',overflow:'hidden'}}>
+        <div ref={mountRef} style={{width:'100%',height:'100%'}}/>
+        <div ref={msgRef} style={{position:'absolute',top:'40%',left:'50%',transform:'translate(-50%,-50%)',color:'#fff',fontSize:42,fontWeight:'bold',background:'rgba(0,0,0,0.6)',padding:'14px 40px',opacity:0,transition:'opacity 0.2s',pointerEvents:'none',whiteSpace:'nowrap', borderRadius:8}}/>
+        
+        <div ref={chargeContainerRef} style={{
+            position:'absolute', bottom: 120, left: '50%', transform: 'translateX(-50%)',
+            width: 250, height: 16, background: 'rgba(0,0,0,0.7)', borderRadius: 10,
+            border: '2px solid rgba(255,255,255,0.2)', overflow: 'hidden',
+            opacity: 0, transition: 'opacity 0.2s', pointerEvents:'none',
+            boxShadow: '0 4px 15px rgba(0,0,0,0.8)'
+        }}>
+            <div ref={chargeRef} style={{
+                height: '100%', width: '0%',
+                background: 'linear-gradient(90deg, #00ffaa 0%, #ffff00 70%, #ff2200 100%)',
+                boxShadow: 'inset 0 0 10px rgba(255,255,255,0.5)',
+                transition: 'width 0.05s linear'
+            }}/>
+            <div ref={chargeTextRef} style={{position:'absolute', top:0, width:'100%', textAlign:'center', fontSize:11, fontWeight:900, color:'#fff', textShadow:'1px 1px 2px #000'}} />
+        </div>
+
+        <div style={{position:'absolute',bottom:10,left:12,display:'flex',alignItems:'center',gap:8}}>
+          <span ref={dashLblRef} style={{fontSize:10,color:'#7c7',minWidth:90}}>{t.dashReady}</span>
+          <div style={{width:80,height:5,background:'rgba(255,255,255,0.08)',overflow:'hidden'}}>
+            <div ref={dashBarRef} style={{height:'100%',width:'100%',background:'#338855',transition:'background 0.15s'}}/>
+          </div>
+        </div>
+
+        {gameOver && (
+          <div style={{position:'absolute',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,0.85)',display:'flex',justifyContent:'center',alignItems:'center',zIndex:100}}>
+             <div style={{background:'#fff',padding:'40px 60px',textAlign:'center',borderRadius:12}}>
+               <h2 style={{fontSize:32, color:'#222', marginBottom:10}}>{gameOver.winnerLabel}</h2>
+               <p style={{color:'#666', marginBottom:28}}>{t.gameOver}</p>
+               <div style={{display:'flex', gap:12}}>
+                 <button onClick={()=>window.handleRematch()} style={{flex:1, padding:'12px', fontSize:14, fontWeight:'bold', background:'#2a7a2a', color:'#fff', border:'none', borderRadius:4, cursor:'pointer'}}>{t.rematch}</button>
+                 <button onClick={()=>window.location.reload()} style={{flex:1, padding:'12px', fontSize:14, fontWeight:'bold', background:'#ddd', color:'#333', border:'none', borderRadius:4, cursor:'pointer'}}>{t.leave}</button>
+               </div>
+             </div>
+          </div>
+        )}
+
+        {isMobile && !gameOver && (
+          <>
+            <div onTouchStart={handleLeftTouchMove} onTouchMove={handleLeftTouchMove} onTouchEnd={handleLeftTouchEnd}
+                 style={{position:'absolute',bottom:'max(8vh, 30px)',left:'max(5vw, 20px)',width:120,height:120,borderRadius:'50%',background:'rgba(0,0,0,0.3)',border:'2px solid rgba(255,255,255,0.2)', touchAction:'none', zIndex: 100}}>
+                 <div ref={leftJoyRef} style={{position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', width: 40, height: 40, borderRadius:'50%', background:'rgba(255,255,255,0.5)', pointerEvents:'none', transition:'transform 0.05s linear'}} />
+            </div>
+            
+            <div onTouchStart={handleRightTouchStart} onTouchMove={handleRightTouchMove} onTouchEnd={handleRightTouchEnd}
+                 style={{position:'absolute',bottom:'max(8vh, 30px)',right:'max(5vw, 20px)',width:120,height:120,borderRadius:'50%',background:'rgba(0,0,0,0.3)',border:'2px solid rgba(255,255,255,0.2)', touchAction:'none', zIndex: 100}}>
+                 <span style={{position:'absolute',top:'20%',left:'50%',transform:'translate(-50%,-50%)',color:'#fff',opacity:0.3,fontSize:9, pointerEvents:'none'}}>SHOOT</span>
+                 <div ref={rightJoyRef} style={{position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', width: 40, height: 40, borderRadius:'50%', background:'rgba(255,100,100,0.5)', pointerEvents:'none', transition:'transform 0.05s linear'}} />
+            </div>
+
+            <div style={{ position:'absolute', bottom:'max(8vh, 30px)', right:'max(15vw, 150px)', display:'grid', gridTemplateColumns:'50px 50px 50px', gridTemplateRows:'50px 50px 50px', gap:'5px', touchAction:'none', zIndex: 100 }}>
+                <div onTouchStart={()=> { touchInputs.current.flick = true; setTimeout(()=>touchInputs.current.flick=false, 100); }} style={{...btnStyle('rgba(255,160,0,0.3)', 'rgba(255,160,0,0.6)'), gridColumn: 2, gridRow: 1}}>FLICK</div>
+                <div onTouchStart={()=> { touchInputs.current.dash = true; }} onTouchEnd={()=>touchInputs.current.dash=false} style={{...btnStyle('rgba(0,255,100,0.3)', 'rgba(0,255,100,0.6)'), gridColumn: 1, gridRow: 2}}>DASH</div>
+                <div onTouchStart={()=> { touchInputs.current.pass = true; setTimeout(()=>touchInputs.current.pass=false, 100); }} style={{...btnStyle('rgba(200,200,200,0.3)', 'rgba(200,200,200,0.6)'), gridColumn: 3, gridRow: 2}}>PASS</div>
+                <div onTouchStart={()=> { touchInputs.current.jump = true; }} onTouchEnd={()=>touchInputs.current.jump=false} style={{...btnStyle('rgba(0,160,255,0.3)', 'rgba(0,160,255,0.6)'), gridColumn: 2, gridRow: 3}}>JUMP</div>
+            </div>
+          </>
+        )}
+
+        {!isMobile && (
+          <div style={{position:'absolute', bottom: 50, left: 12, width: 300, pointerEvents: 'none', display:'flex', flexDirection:'column', gap: 4}}>
+            <div style={{display:'flex', flexDirection:'column', gap:2, textShadow:'1px 1px 0 #000'}}>
+              {chatMessages.map((msg, i) => (
+                <div key={i} style={{fontSize:12, color:'#fff'}}><span style={{color:'#aaa'}}>{msg.sender}:</span> {msg.text}</div>
+              ))}
+            </div>
+            <form onSubmit={sendChat} style={{pointerEvents: 'auto', marginTop: 6}}>
+              <input 
+                type="text" placeholder={t.chatPlaceholder} value={chatInput} 
+                onChange={e => setChatInput(e.target.value)} 
+                onFocus={() => isTyping.current = true} onBlur={() => isTyping.current = false}
+                onKeyDown={e => e.stopPropagation()}
+                style={{width: '100%', background:'rgba(0,0,0,0.5)', border:'1px solid #444', color:'#fff', padding:'6px 10px', borderRadius: 4, outline:'none', fontSize:12}}
+              />
+            </form>
+          </div>
+        )}
+      </div>
+
+      {!isMobile && (
+        <div style={{background:'#1a1a1a',borderTop:'1px solid #333',padding:'0 16px',flexShrink:0,height:32,display:'flex',gap:18,justifyContent:'center',alignItems:'center',flexWrap:'wrap'}}>
+          {currentControls.map(([k,v])=>(
+            <span key={k} style={{color:'#666',fontSize:10}}>
+              <span style={{color:'#bbb',marginRight:3}}>{k}</span>{v}
+            </span>
+          ))}
+          {mode === 'multi' && <span style={{color:'#888',fontSize:10, marginLeft: 20}}>{t.p2LocalHint}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App(){
+  const [screen,setScreen]=useState('menu');
+  const [cfg,setCfg]=useState({mode:'bot',difficulty:'medium'});
+  const [lang, setLang] = useState('en'); 
+  const [theme, setTheme] = useState('dark');
+  const [musicPlaying, setMusicPlaying] = useState(true);
+  
+  const [interacted, setInteracted] = useState(false);
+
+  if(screen==='menu') return <Menu onStart={c=>{setCfg(c);setScreen('game');}} lang={lang} setLang={setLang} theme={theme} setTheme={setTheme} onInteract={()=>setInteracted(true)} musicPlaying={musicPlaying} setMusicPlaying={setMusicPlaying} />;
+  return <Game {...cfg} lang={lang} onBack={()=>setScreen('menu')}/>;
+} 
